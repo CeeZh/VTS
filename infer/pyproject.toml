@@ -1,0 +1,33 @@
+[project]
+name = "vts-infer"
+version = "0.1.0"
+description = "Inference code for VideoTreeSearch (VTS)"
+readme = "../README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Core
+    "numpy>=2.0",
+    "tqdm>=4.66",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    # Video / images
+    "opencv-python>=4.10",
+    "av>=12.0",
+    # Data loading
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+    "fastparquet>=2024.2",
+    # Plotting / visualization
+    "matplotlib>=3.8",
+    # VLM client
+    "openai>=1.40",
+    # CLIP-based scene segmentation (query-agnostic-clip mode)
+    "clip-client>=0.8",
+    "docarray>=0.21,<0.30",
+    # Optional metrics (LongVideoHaystack SSIM evaluation)
+    "torch>=2.3",
+    "torchvision>=0.18",
+    # For serving the model (vllm serve ...). Comment out if you serve elsewhere.
+    "vllm>=0.6",
+    "transformers>=4.45",
+]
