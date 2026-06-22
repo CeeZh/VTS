@@ -22,7 +22,7 @@ On three Grounded LVQA benchmarks (CG-Bench, Haystack-LVBench, Haystack-Ego4D), 
 VTS/
 ├── infer/   # Inference: tree-search agent over a vLLM-served VLM
 ├── sft/     # Supervised fine-tuning on synthesized trajectories (LLaMA-Factory configs)
-└── rl/      # (coming soon) Reinforcement learning with grounding + answer rewards
+└── rl/      # GRPO fine-tuning with tree-search multi-turn rollouts (ms-swift plugin)
 ```
 
 ## Model checkpoint
@@ -160,4 +160,72 @@ The trajectory synthesis pipeline that produces `all_sft.json` will be released 
 
 ## RL
 
-Coming soon.
+After SFT we further fine-tune the policy with GRPO on the same tree-search trajectories. RL runs on top of [ms-swift](https://github.com/modelscope/ms-swift): the multi-turn rollout loop, reward functions, and tree-state bookkeeping live in [rl/video_crop_plugin.py](rl/video_crop_plugin.py) and are loaded by `swift` via `--external_plugins`.
+
+### 1. Environment
+
+```bash
+git clone https://github.com/modelscope/ms-swift.git
+cd ms-swift
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[llm,vllm]"
+uv pip install flash-attn --no-build-isolation
+```
+
+Then link this repo's `rl/` folder into the swift checkout so the plugin's `--external_plugins rl/video_crop_plugin.py` path resolves:
+
+```bash
+ln -s /path/to/VTS/rl rl
+```
+
+### 2. (If starting from an SFT checkpoint) Convert the checkpoint
+
+LLaMA-Factory writes checkpoints with the transformers-5.x layout; ms-swift/vLLM expects 4.x. Convert before loading:
+
+```bash
+python rl/scripts/convert_checkpoint.py \
+  --checkpoint-dir /path/to/sft_checkpoint \
+  --original-model-dir /path/to/Qwen3-VL-8B-Instruct \
+  --output-dir /path/to/sft_checkpoint-converted
+```
+
+### 3. Prepare the dataset
+
+Each sample is one record of QA + ground-truth interval + paths to the precomputed scene tree and 1fps frames. Build a JSONL for each source dataset, then concatenate:
+
+```bash
+python rl/data_scripts/cgbench_rl.py          --anno_path ... --output_path rl/data/cgbench.jsonl
+python rl/data_scripts/lvhaystack_ego4d_rl.py --anno_path ... --output_path rl/data/lvhaystack_ego4d.jsonl
+python rl/data_scripts/youtube_rl.py          --anno_path ... --output_path rl/data/youtube.jsonl
+cat rl/data/*.jsonl > rl/data/merged.jsonl
+```
+
+Each script's `--help` lists the dataset-specific paths it needs (annotation file, video base dir, tree cache dir).
+
+### 4. Launch training
+
+GRPO needs two GPU groups: one serves rollouts, the others run policy updates and connect to that server.
+
+```bash
+# A) Start the rollout server (1 GPU). Connects on port 8100.
+MODEL=/path/to/sft_checkpoint-converted bash rl/rollout.sh
+
+# B) Launch the trainer (3 GPUs by default) — set the same MODEL.
+MODEL=/path/to/sft_checkpoint-converted \
+DATASET=rl/data/merged.jsonl \
+OUTPUT_DIR=rl/ckpt/vts_grpo \
+bash rl/grpo_all60.sh
+```
+
+Both scripts are sbatch wrappers; remove the `sbatch ... --wrap=` shell and run the inner `swift rollout` / `swift rlhf` command directly if you're not on Slurm.
+
+Key knobs (in [rl/grpo_all60.sh](rl/grpo_all60.sh)):
+
+- `--reward_funcs tree_acc_reward tree_format_reward tree_iou_reward tree_gt_distance_reward tree_debug_logger` — the reward stack (defined in [video_crop_plugin.py](rl/video_crop_plugin.py)).
+- `--reward_weights 0.5 0.5 1.0 0.0 0.0` — combine answer accuracy, format, evidence-IoU, GT-distance, and a passthrough logger.
+- `--train_type lora --lora_rank 32 --lora_alpha 64 --target_modules all-linear` — LoRA over the LLM (ViT and aligner frozen by the env vars `--freeze_vit true --freeze_aligner false --freeze_llm false`).
+- `MAX_TURNS=10`, `NUM_FRAMES_PER_SEGMENT=64` — controlled by env vars that the plugin reads on startup.
+- `--num_generations 8 --steps_per_generation 8 --beta 0.04` — GRPO sampling/regularization settings.
+
+After RL, merge the LoRA adapter into the base policy with `swift export --adapter ... --merge_lora true` — that's the artifact we publish as [ceezh/VTS-Qwen3-VL-8B](https://huggingface.co/ceezh/VTS-Qwen3-VL-8B).
