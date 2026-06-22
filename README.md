@@ -21,7 +21,7 @@ On three Grounded LVQA benchmarks (CG-Bench, Haystack-LVBench, Haystack-Ego4D), 
 ```
 VTS/
 ├── infer/   # Inference: tree-search agent over a vLLM-served VLM
-├── sft/     # (coming soon) Supervised fine-tuning on synthesized trajectories
+├── sft/     # Supervised fine-tuning on synthesized trajectories (LLaMA-Factory configs)
 └── rl/      # (coming soon) Reinforcement learning with grounding + answer rewards
 ```
 
@@ -104,4 +104,60 @@ Key arguments:
 
 Run `python example_inference.py --help` for the full argument list.
 
-SFT and RL training code will be released here soon.
+## SFT
+
+We fine-tune Qwen3-VL-8B-Instruct (or Qwen2.5-VL-7B-Instruct) on synthesized tree-search trajectories using [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory). The [sft/](sft/) folder holds only the training configs — the trainer itself lives in LLaMA-Factory.
+
+### 1. Environment
+
+```bash
+git clone https://github.com/hiyouga/LLaMA-Factory.git
+cd LLaMA-Factory
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[torch,metrics,deepspeed]"
+uv pip install flash-attn --no-build-isolation
+```
+
+### 2. Drop the VTS SFT configs into LLaMA-Factory
+
+From inside the `LLaMA-Factory` checkout, link this repo's `sft/` folder in as `vts_sft/` (a copy works too — the configs reference paths relative to LLaMA-Factory's root):
+
+```bash
+ln -s /path/to/VTS/sft vts_sft
+```
+
+### 3. Provide the training data
+
+Put your SFT trajectory JSON at `vts_sft/data/all_sft.json`. It should follow LLaMA-Factory's ShareGPT format (the schema is already declared in [sft/data/dataset_info.json](sft/data/dataset_info.json) — `messages` + `images` columns). Each sample is one full multi-turn trajectory: a system prompt, the user's video+question turn, and the assistant's `ZOOM_IN` / `ZOOM_OUT` / `SHIFT` / `ANSWER` decisions interleaved with observations.
+
+### 4. Launch training
+
+Single node, 4 GPUs (matches the slurm script in [sft/train.slurm](sft/train.slurm)):
+
+```bash
+# from the LLaMA-Factory root
+python -m llamafactory.cli train vts_sft/sft_qwen3.yaml       # Qwen3-VL-8B
+# or
+python -m llamafactory.cli train vts_sft/sft_qwen2.5.yaml     # Qwen2.5-VL-7B
+```
+
+Or as a slurm job:
+
+```bash
+sbatch vts_sft/train.slurm
+```
+
+Key knobs in the YAML configs ([sft_qwen3.yaml](sft/sft_qwen3.yaml), [sft_qwen2.5.yaml](sft/sft_qwen2.5.yaml)):
+
+- `model_name_or_path` — base VLM to fine-tune.
+- `freeze_vision_tower` / `freeze_multi_modal_projector` — both `true`: only the LLM is trained.
+- `cutoff_len: 32768` — long enough for full multi-turn trajectories with frames.
+- `deepspeed: examples/deepspeed/ds_z3_config.json` — ZeRO-3 from LLaMA-Factory's bundled configs.
+- `output_dir` — checkpoint destination, relative to the LLaMA-Factory root.
+
+The trajectory synthesis pipeline that produces `all_sft.json` will be released in a follow-up.
+
+## RL
+
+Coming soon.
