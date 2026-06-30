@@ -17,6 +17,9 @@ outputs/
 *.log
 slurm_logs/
 
+# Dataset (hosted on Hugging Face: ceezh/VTS_data)
+/data/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -31,6 +31,58 @@ Our VTS model (Qwen3-VL-8B-Instruct backbone, after SFT + RL) is on the Hugging 
 
 - **`ceezh/VTS-Qwen3-VL-8B`** — https://huggingface.co/ceezh/VTS-Qwen3-VL-8B
 
+## Dataset
+
+All training and evaluation data is released as a Hugging Face dataset:
+
+- **`ceezh/VTS_data`** — https://huggingface.co/datasets/ceezh/VTS_data
+
+Download it (the paths below are relative to the downloaded `data/` root):
+
+```bash
+huggingface-cli download ceezh/VTS_data --repo-type dataset --local-dir data
+```
+
+| path                          | what                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `sft/sft.json`              | SFT trajectories, LLaMA-Factory ShareGPT format (used by[SFT](#sft))                                                   |
+| `rl/rl.json`                | RL training records, JSONL (used by[RL](#rl))                                                                          |
+| `tree_cache/`               | pre-built scene trees consumed by RL rollouts                                                                       |
+| `trajectories/`             | raw synthesized search trajectories (source for`sft.json`)                                                        |
+| `annotations/`              | inference / evaluation annotations — CG-Bench mini, Haystack-Ego4D, Haystack-LVBench (used by[Inference](#inference)) |
+| `videos/longclueqa/`        | LongClueQA videos (our YouTube-sourced set), shipped with the dataset                                               |
+| `scripts/extract_frames.py` | extract 1 fps frames from videos                                                                                    |
+| `dataset_info.json`         | LLaMA-Factory dataset manifest for SFT (lets you point`dataset_dir` straight at this folder)                      |
+
+`sft.json` and `rl.json` reference frames, videos, and tree caches by **relative**
+path (`frames/<dataset>/...`, `videos/<dataset>/...`, `tree_cache/<dataset>/...`),
+all rooted at this `data/` directory. Three source datasets are used:
+`cgbench` ([CG-Bench](https://huggingface.co/datasets/CG-Bench/CG-Bench)),
+`lvhaystack_ego4d` ([LongVideoHaystack](https://huggingface.co/datasets/MLL-Lab/LongVideoHaystack)),
+and `longclueqa` (ours, included).
+
+### Videos and frames
+
+`videos/longclueqa/` ships with the dataset. Download the CG-Bench videos from
+[CG-Bench](https://huggingface.co/datasets/CG-Bench/CG-Bench) and the Ego4D
+videos from [LongVideoHaystack](https://huggingface.co/datasets/MLL-Lab/LongVideoHaystack)
+(source videos from [Ego4D](https://ego4d-data.org/), which requires signing the
+Ego4D license), then place them at `videos/cgbench/<video_id>.mp4` and
+`videos/lvhaystack_ego4d/<video_id>.mp4`. Then extract 1 fps frames — these are
+what SFT and RL actually read:
+
+```bash
+python data/scripts/extract_frames.py \
+    --videos-root data/videos \
+    --frames-root data/frames \
+    --datasets cgbench lvhaystack_ego4d longclueqa \
+    --workers 16
+```
+
+This writes `frames/<dataset>/<video_id>/<sec>.jpg`, matching the paths baked
+into `sft.json` and `rl.json` (requires `ffmpeg`). Run
+`python data/scripts/extract_frames.py --help` for all options.
+
 ## Setup
 
 We use [uv](https://docs.astral.sh/uv/) for environment management (Python 3.12).
@@ -119,34 +171,21 @@ uv pip install -e ".[torch,metrics,deepspeed]"
 uv pip install flash-attn --no-build-isolation
 ```
 
-### 2. Drop the VTS SFT configs into LLaMA-Factory
+### 2. Train
 
-From inside the `LLaMA-Factory` checkout, link this repo's `sft/` folder in as `vts_sft/` (a copy works too — the configs reference paths relative to LLaMA-Factory's root):
-
-```bash
-ln -s /path/to/VTS/sft vts_sft
-```
-
-### 3. Provide the training data
-
-Put your SFT trajectory JSON at `vts_sft/data/all_sft.json`. It should follow LLaMA-Factory's ShareGPT format (the schema is already declared in [sft/data/dataset_info.json](sft/data/dataset_info.json) — `messages` + `images` columns). Each sample is one full multi-turn trajectory: a system prompt, the user's video+question turn, and the assistant's `ZOOM_IN` / `ZOOM_OUT` / `SHIFT` / `ANSWER` decisions interleaved with observations.
-
-### 4. Launch training
-
-Single node, 4 GPUs (matches the slurm script in [sft/train.slurm](sft/train.slurm)):
+Download the [dataset](#dataset) into `./data`, then train from the VTS repo
+root — no symlinking, copying, or data re-organizing:
 
 ```bash
-# from the LLaMA-Factory root
-python -m llamafactory.cli train vts_sft/sft_qwen3.yaml       # Qwen3-VL-8B
+python -m llamafactory.cli train ./sft/sft_qwen3.yaml      # Qwen3-VL-8B
 # or
-python -m llamafactory.cli train vts_sft/sft_qwen2.5.yaml     # Qwen2.5-VL-7B
+python -m llamafactory.cli train ./sft/sft_qwen2.5.yaml    # Qwen2.5-VL-7B
 ```
 
-Or as a slurm job:
-
-```bash
-sbatch vts_sft/train.slurm
-```
+The configs already point at `./sft/data/dataset_info.json` and `data/sft/sft.json`,
+and image paths resolve relative to the repo root, so the `frames/<dataset>/...`
+paths baked into `sft.json` work directly. Make sure you have extracted frames
+first (see [Videos and frames](#videos-and-frames)).
 
 Key knobs in the YAML configs ([sft_qwen3.yaml](sft/sft_qwen3.yaml), [sft_qwen2.5.yaml](sft/sft_qwen2.5.yaml)):
 
@@ -154,9 +193,11 @@ Key knobs in the YAML configs ([sft_qwen3.yaml](sft/sft_qwen3.yaml), [sft_qwen2.
 - `freeze_vision_tower` / `freeze_multi_modal_projector` — both `true`: only the LLM is trained.
 - `cutoff_len: 32768` — long enough for full multi-turn trajectories with frames.
 - `deepspeed: examples/deepspeed/ds_z3_config.json` — ZeRO-3 from LLaMA-Factory's bundled configs.
-- `output_dir` — checkpoint destination, relative to the LLaMA-Factory root.
+- `output_dir` — checkpoint destination.
 
-The trajectory synthesis pipeline that produces `all_sft.json` will be released in a follow-up.
+The raw synthesized trajectories that `sft.json` is rendered from are in the
+[released dataset](#dataset) under `trajectories/`. The trajectory synthesis
+pipeline (the code that generates them) will be released in a follow-up.
 
 ## RL
 
@@ -190,20 +231,13 @@ python rl/scripts/convert_checkpoint.py \
   --output-dir /path/to/sft_checkpoint-converted
 ```
 
-### 3. Prepare the dataset
+### 3. Launch training
 
-Each sample is one record of QA + ground-truth interval + paths to the precomputed scene tree and 1fps frames. Build a JSONL for each source dataset, then concatenate:
-
-```bash
-python rl/data_scripts/cgbench_rl.py          --anno_path ... --output_path rl/data/cgbench.jsonl
-python rl/data_scripts/lvhaystack_ego4d_rl.py --anno_path ... --output_path rl/data/lvhaystack_ego4d.jsonl
-python rl/data_scripts/youtube_rl.py          --anno_path ... --output_path rl/data/youtube.jsonl
-cat rl/data/*.jsonl > rl/data/merged.jsonl
-```
-
-Each script's `--help` lists the dataset-specific paths it needs (annotation file, video base dir, tree cache dir).
-
-### 4. Launch training
+The dataset is `rl/rl.json` from the [released dataset](#dataset) — ready to use
+as-is; just point `DATASET` at it below. Its `video_path`, `frames_base_dir`, and
+`tree_cache_dir` fields are relative to the `data/` root, so run `swift` from
+that folder (or otherwise make those paths resolve), and make sure you have
+extracted frames first (see [Videos and frames](#videos-and-frames)).
 
 GRPO needs two GPU groups: one serves rollouts, the others run policy updates and connect to that server.
 
@@ -213,7 +247,7 @@ MODEL=/path/to/sft_checkpoint-converted bash rl/rollout.sh
 
 # B) Launch the trainer (3 GPUs by default) — set the same MODEL.
 MODEL=/path/to/sft_checkpoint-converted \
-DATASET=rl/data/merged.jsonl \
+DATASET=/path/to/data/rl/rl.json \
 OUTPUT_DIR=rl/ckpt/vts_grpo \
 bash rl/grpo_all60.sh
 ```

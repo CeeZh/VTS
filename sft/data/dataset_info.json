@@ -1,6 +1,6 @@
 {
-  "all_sft": {
-    "file_name": "all_sft.json",
+  "sft": {
+    "file_name": "data/sft/sft.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",
