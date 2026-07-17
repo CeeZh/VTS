@@ -50,7 +50,8 @@ huggingface-cli download ceezh/VTS_data --repo-type dataset --local-dir data
 | `tree_cache/`               | pre-built scene trees consumed by RL rollouts                                                                       |
 | `trajectories/`             | raw synthesized search trajectories (source for`sft.json`)                                                        |
 | `annotations/`              | inference / evaluation annotations — CG-Bench mini, Haystack-Ego4D, Haystack-LVBench (used by[Inference](#inference)) |
-| `videos/longclueqa/`        | LongClueQA videos (our YouTube-sourced set), shipped with the dataset                                               |
+| `videos/longclueqa_youtube_ids.txt` | YouTube IDs of the LongClueQA videos (download them yourself — see[Videos and frames](#videos-and-frames))   |
+| `scripts/download_longclueqa.py` | download the LongClueQA videos from YouTube                                                                     |
 | `scripts/extract_frames.py` | extract 1 fps frames from videos                                                                                    |
 | `dataset_info.json`         | LLaMA-Factory dataset manifest for SFT (lets you point`dataset_dir` straight at this folder)                      |
 
@@ -59,17 +60,36 @@ path (`frames/<dataset>/...`, `videos/<dataset>/...`, `tree_cache/<dataset>/...`
 all rooted at this `data/` directory. Three source datasets are used:
 `cgbench` ([CG-Bench](https://huggingface.co/datasets/CG-Bench/CG-Bench)),
 `lvhaystack_ego4d` ([LongVideoHaystack](https://huggingface.co/datasets/MLL-Lab/LongVideoHaystack)),
-and `longclueqa` (ours, included).
+and `longclueqa` (ours; videos downloaded from YouTube via the provided script).
 
 ### Videos and frames
 
-`videos/longclueqa/` ships with the dataset. Download the CG-Bench videos from
-[CG-Bench](https://huggingface.co/datasets/CG-Bench/CG-Bench) and the Ego4D
-videos from [LongVideoHaystack](https://huggingface.co/datasets/MLL-Lab/LongVideoHaystack)
-(source videos from [Ego4D](https://ego4d-data.org/), which requires signing the
-Ego4D license), then place them at `videos/cgbench/<video_id>.mp4` and
-`videos/lvhaystack_ego4d/<video_id>.mp4`. Then extract 1 fps frames — these are
-what SFT and RL actually read:
+No videos ship with the dataset — you download all three sets yourself and place
+them at `videos/<dataset>/<video_id>.mp4`.
+
+- **`longclueqa`** — sourced from public YouTube videos, which we are not
+  permitted to redistribute. The dataset ships the source YouTube IDs
+  (`videos/longclueqa_youtube_ids.txt`); download the videos with the provided
+  script (needs [`yt-dlp`](https://github.com/yt-dlp/yt-dlp)):
+
+  ```bash
+  uv pip install yt-dlp
+  python data/scripts/download_longclueqa.py \
+      --out-dir data/videos/longclueqa \
+      --workers 4
+  ```
+
+  Each YouTube ID *is* the `<video_id>`, so downloads land at
+  `videos/longclueqa/<video_id>.mp4` matching every path baked into the data.
+  The script is safe to re-run; see `--help` for `--cookies` and other options.
+- **`cgbench`** — download from [CG-Bench](https://huggingface.co/datasets/CG-Bench/CG-Bench)
+  into `videos/cgbench/<video_id>.mp4`.
+- **`lvhaystack_ego4d`** — Ego4D source videos from
+  [LongVideoHaystack](https://huggingface.co/datasets/MLL-Lab/LongVideoHaystack)
+  ([Ego4D](https://ego4d-data.org/) requires signing the Ego4D license); place
+  them at `videos/lvhaystack_ego4d/<video_id>.mp4`.
+
+Then extract 1 fps frames — these are what SFT and RL actually read:
 
 ```bash
 python data/scripts/extract_frames.py \
