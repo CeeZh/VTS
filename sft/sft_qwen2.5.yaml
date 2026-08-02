@@ -11,10 +11,11 @@ finetuning_type: full
 freeze_vision_tower: true
 freeze_multi_modal_projector: true
 freeze_language_model: false
-deepspeed: examples/deepspeed/ds_z3_config.json
+deepspeed: ./sft/ds_z3_config.json
 
 ### dataset
-dataset_dir: ./sft/data/dataset_info.json
+dataset_dir: data              # folder holding dataset_info.json (-> data/sft/sft.json)
+media_dir: .                  # image paths in sft.json are repo-root-relative (data/frames/...)
 dataset: sft
 template: qwen2_vl
 cutoff_len: 32768
@@ -39,5 +40,5 @@ lr_scheduler_type: cosine
 warmup_ratio: 0.10
 bf16: true
 ddp_timeout: 180000000
-flash_attn: fa2
+flash_attn: sdpa
 gradient_checkpointing: true

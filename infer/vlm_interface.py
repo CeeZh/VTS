@@ -60,6 +60,54 @@ class VLMInterface(ABC):
             Textual description of the segment
         """
         pass
+
+    def generate_descriptions_batched(
+        self,
+        question: str,
+        frames: List[float],
+        children: List[Dict[str, Any]],
+        start_sec: float,
+        end_sec: float,
+        video_path: str,
+        short_side: int = -1,
+        detailed: bool = True,
+    ) -> Dict[int, str]:
+        """
+        Generate captions for multiple child segments.
+
+        Default implementation falls back to one generate_description call per
+        child. Subclasses may override with a single batched VLM call.
+
+        Args:
+            question: Question to answer about the video
+            frames: Timestamps (in seconds) sampled from the PARENT segment
+            children: List of dicts with keys segment_id, start_sec, end_sec
+            start_sec: Start time of the parent segment
+            end_sec: End time of the parent segment
+            video_path: Path to the video file
+            short_side: Resize frames so shorter side has this size (-1 for no resize)
+            detailed: If True, generate detailed descriptions; else brief
+
+        Returns:
+            Dict mapping each child's segment_id to its caption.
+        """
+        captions: Dict[int, str] = {}
+        for child in children:
+            c_start = child['start_sec']
+            c_end = child['end_sec']
+            sub = [t for t in frames if c_start <= t <= c_end]
+            if not sub:
+                sub = [(c_start + c_end) / 2.0]
+            captions[child['segment_id']] = self.generate_description(
+                question=question,
+                frames=sub,
+                start_sec=c_start,
+                end_sec=c_end,
+                video_path=video_path,
+                short_side=short_side,
+                detailed=detailed,
+            )
+        return captions
     
     @abstractmethod
     def compute_relevance_score(
@@ -375,6 +423,38 @@ class VLMInterface(ABC):
                 - 'evidence_end': float
         """
         raise NotImplementedError("direct_answer() not implemented for this VLM interface")
+
+    def caption_tree_answer(
+        self,
+        question: str,
+        choices: List[str],
+        tree_text: str,
+        video_duration: float,
+        skip_reasoning: bool = False,
+        include_unanswerable: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        VideoTree-style baseline: answer a question purely from a pre-built
+        hierarchical caption tree (text only, no frames).
+
+        The entire caption tree (segment time ranges + captions) is serialized
+        to text and shown to the model, which is asked to answer the
+        multiple-choice question and identify the time interval (temporal
+        grounding) containing the supporting evidence.
+
+        Args:
+            question: The question to answer
+            choices: List of multiple choice options
+            tree_text: Serialized hierarchical caption tree
+            video_duration: Total video duration in seconds (grounding range)
+            skip_reasoning: If True, omit the reasoning field from the JSON schema
+            include_unanswerable: If True, append an "unanswerable" choice
+
+        Returns:
+            Tuple of (parsed_result_dict, raw_response_text) with keys
+            'reasoning', 'answer', 'evidence_start', 'evidence_end'.
+        """
+        raise NotImplementedError("caption_tree_answer() not implemented for this VLM interface")
 
 
 class DummyVLMInterface(VLMInterface):
@@ -693,6 +773,34 @@ class DummyVLMInterface(VLMInterface):
             'answer': answer,
             'evidence_start': start_sec + duration * 0.2,
             'evidence_end': end_sec - duration * 0.2,
+        }
+        raw_response = json.dumps(result, indent=2)
+        return result, raw_response
+
+    def caption_tree_answer(
+        self,
+        question: str,
+        choices: List[str],
+        tree_text: str,
+        video_duration: float,
+        skip_reasoning: bool = False,
+        include_unanswerable: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Dummy caption_tree_answer -- random answer and evidence interval."""
+        choices = self._maybe_add_unanswerable(choices, include_unanswerable)
+        import json
+
+        if choices:
+            idx = np.random.randint(len(choices))
+            answer = chr(65 + idx)
+        else:
+            answer = 'A'
+
+        result = {
+            'reasoning': 'Dummy caption tree answer.',
+            'answer': answer,
+            'evidence_start': video_duration * 0.2,
+            'evidence_end': video_duration * 0.8,
         }
         raw_response = json.dumps(result, indent=2)
         return result, raw_response
@@ -1095,6 +1203,82 @@ class GPTVLMInterface(VLMInterface):
             temperature=0.7,
         )
         return response.choices[0].message.content.strip()
+
+    def generate_descriptions_batched(
+        self,
+        question: str,
+        frames: List[float],
+        children: List[Dict[str, Any]],
+        start_sec: float,
+        end_sec: float,
+        video_path: str,
+        short_side: int = -1,
+        detailed: bool = True,
+    ) -> Dict[int, str]:
+        """Caption all child segments in a SINGLE VLM call.
+
+        The parent segment's frames are sent once (each labeled with its
+        timestamp) and the model is asked to return one caption per child as a
+        JSON dict keyed by segment_id. This shares the parent frame budget
+        across all children instead of re-sending frames per child.
+        """
+        if len(frames) == 0 or len(children) == 0:
+            return {}
+
+        seg_lines = "\n".join(
+            f"- Segment {c['segment_id']}: [{c['start_sec']:.1f}s - {c['end_sec']:.1f}s]"
+            for c in children
+        )
+        detail_word = "detailed" if detailed else "brief"
+        word_limit = "50" if detailed else "30"
+        prompt_text = (
+            f"The frames above are sampled from a video segment spanning "
+            f"{start_sec:.1f}s to {end_sec:.1f}s, each labeled with its timestamp. "
+            f"This segment is divided into the following non-overlapping child "
+            f"segments:\n{seg_lines}\n\n"
+            f"For EACH child segment, using only the frames whose timestamps fall "
+            f"within that segment's time range, write a {detail_word} description "
+            f"within {word_limit} words. Respond with ONLY a JSON object mapping "
+            f"each segment_id (as a string) to its description, e.g. "
+            f'{{"0": "...", "1": "..."}}.'
+        )
+
+        content = self._build_video_content(frames, prompt_text, video_path, short_side)
+        response = self._create_completion(
+            method_name="generate_descriptions_batched",
+            messages=[{"role": "user", "content": content}],
+            max_tokens=1024,
+            temperature=0.7,
+        )
+        response_text = response.choices[0].message.content.strip()
+
+        # Parse JSON dict {segment_id: caption}; tolerate code fences / extra text.
+        import json
+        import re
+        parsed = None
+        m = re.search(r'```(?:json)?\s*(\{.*\})\s*```', response_text, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(1))
+            except Exception:
+                parsed = None
+        if parsed is None:
+            m = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except Exception:
+                    parsed = None
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"No JSON caption dict found in response: {response_text[:300]}"
+            )
+
+        captions: Dict[int, str] = {}
+        for k, v in parsed.items():
+            key = int(k) if str(k).isdigit() else k
+            captions[key] = str(v)
+        return captions
 
     def compute_relevance_score(
         self,
@@ -3752,6 +3936,80 @@ IMPORTANT: Respond with ONLY the letter (A, B, C, D, etc.) of your answer - noth
 
         parsed = self._parse_direct_answer_response(
             response_text, start_sec, end_sec, choices
+        )
+
+        return parsed, response_text
+
+    def caption_tree_answer(
+        self,
+        question: str,
+        choices: List[str],
+        tree_text: str,
+        video_duration: float,
+        skip_reasoning: bool = False,
+        include_unanswerable: bool = False,
+    ) -> Tuple[Dict[str, Any], str]:
+        """
+        VideoTree-style baseline: answer purely from a serialized hierarchical
+        caption tree (text only, no frames). See VLMInterface.caption_tree_answer.
+        """
+        reasoning_field = '' if skip_reasoning else '  "reasoning": "<your concise reasoning>",\n'
+
+        system_text = (
+            "You are a long-video question-answering agent. You are given a "
+            "hierarchical caption tree summarizing an entire video. Each node "
+            "covers a time interval [start-end] (in seconds) and has a caption "
+            "describing what happens in that interval. Deeper (more indented) "
+            "nodes describe finer-grained sub-intervals of their parent. The "
+            f"video spans 0.0s to {video_duration:.1f}s.\n\n"
+            "Your task is to:\n"
+            "1. Answer the multiple-choice question using only the caption tree.\n"
+            "2. Identify the time interval (in seconds) that contains the "
+            "evidence supporting your answer (temporal grounding).\n\n"
+        )
+
+        choices = self._maybe_add_unanswerable(choices, include_unanswerable)
+        formatted_choices = "\n".join([
+            f"{chr(65 + i)}. {choice}" for i, choice in enumerate(choices)
+        ])
+
+        json_template = (
+            "{\n"
+            + reasoning_field +
+            '  "answer": "<letter>",\n'
+            '  "evidence_start": <float>,\n'
+            '  "evidence_end": <float>\n'
+            "}"
+        )
+
+        prompt_text = (
+            system_text
+            + f"Question: {question}\n\nChoices:\n{formatted_choices}\n\n"
+            + f"Video caption tree:\n{tree_text}\n\n"
+            + "Based on the caption tree above, answer the question and identify "
+            "the time interval containing the supporting evidence.\n\n"
+            "Respond in EXACTLY this JSON format (no other text before or after):\n"
+            "```json\n"
+            f"{json_template}\n"
+            "```\n\n"
+            "Rules:\n"
+            "- answer: The letter of the correct choice (A, B, C, etc.)\n"
+            f"- evidence_start/evidence_end: The time interval (in seconds, between "
+            f"0.0 and {video_duration:.1f}) that most likely contains the "
+            "evidence for your answer, based on the node time ranges.\n"
+        )
+
+        response = self._create_completion(
+            method_name="caption_tree_answer",
+            messages=[{"role": "user", "content": prompt_text}],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+
+        response_text = response.choices[0].message.content.strip()
+
+        parsed = self._parse_direct_answer_response(
+            response_text, 0.0, float(video_duration), choices
         )
 
         return parsed, response_text

@@ -50,6 +50,7 @@ class InferenceConfig:
     loop_detection_window: int = 2  # Window size for 'window' mode; -1 = dynamic (try all sizes from 1..len//2)
     separate_caption_generation: bool = False  # If True, generate captions in a separate VLM call per segment before decide_action
     caption_frames_from_parent: bool = False  # If True, caption each child using parent frames cropped to the child's time range (instead of child.frames)
+    batched_captions: bool = False  # If True (with separate_caption_generation), caption ALL children in a single VLM call over the parent's frames instead of one call per child
     skip_reasoning: bool = False  # If True, omit the reasoning field from the VLM JSON schema
     pregenerated_caption_path: Optional[str] = None  # Path to pregenerated caption JSON files for frame captions
     use_frame_captions: bool = False  # If True, include pregenerated frame captions in the prompt
@@ -290,10 +291,11 @@ class InferenceEngine:
 
             # (c3) Separate caption generation: caption each child before decide_action
             if self.config.separate_caption_generation:
+                # Resolve cached captions first (avoids unnecessary VLM calls)
+                pending = []
                 for child in children:
                     if child.text_description:
                         continue
-                    # Try tree cache first to avoid unnecessary VLM calls
                     if self.tree_cache is not None:
                         cached_caption = self.tree_cache.get_caption(
                             self._current_video_id, child.start_sec, child.end_sec
@@ -301,19 +303,49 @@ class InferenceEngine:
                         if cached_caption:
                             child.text_description = cached_caption
                             continue
+                    pending.append(child)
+
+                if pending and self.config.batched_captions:
+                    # One VLM call: caption all pending children from the parent's frames
                     try:
-                        caption = self.vlm.generate_description(
+                        captions = self.vlm.generate_descriptions_batched(
                             question=question,
-                            frames=_frames_for_child(child),
-                            start_sec=child.start_sec,
-                            end_sec=child.end_sec,
+                            frames=current_node.frames,
+                            children=[
+                                {
+                                    'segment_id': child.node_id,
+                                    'start_sec': child.start_sec,
+                                    'end_sec': child.end_sec,
+                                }
+                                for child in pending
+                            ],
+                            start_sec=current_node.start_sec,
+                            end_sec=current_node.end_sec,
                             video_path=video_path,
                             short_side=self.config.short_side,
                             detailed=True,
                         )
-                        child.text_description = caption
+                        for child in pending:
+                            caption = captions.get(child.node_id)
+                            if caption:
+                                child.text_description = caption
                     except Exception as e:
-                        print(f"Warning: generate_description failed for segment {child.node_id}: {e}")
+                        print(f"Warning: generate_descriptions_batched failed: {e}")
+                else:
+                    for child in pending:
+                        try:
+                            caption = self.vlm.generate_description(
+                                question=question,
+                                frames=_frames_for_child(child),
+                                start_sec=child.start_sec,
+                                end_sec=child.end_sec,
+                                video_path=video_path,
+                                short_side=self.config.short_side,
+                                detailed=True,
+                            )
+                            child.text_description = caption
+                        except Exception as e:
+                            print(f"Warning: generate_description failed for segment {child.node_id}: {e}")
 
             # (d) Call VLM to decide action
             try:
@@ -956,6 +988,137 @@ class InferenceEngine:
         trajectory.metadata['engine'] = 'InferenceEngine_direct_keyframes'
         trajectory.metadata['frames_per_turn'] = [len(root_frames)]
         trajectory.metadata['total_frames'] = len(root_frames)
+
+        if ground_truth:
+            self._compute_eval_metrics(trajectory, ground_truth)
+
+        return trajectory
+
+    @staticmethod
+    def _serialize_cache_tree(node: Dict[str, Any], indent_level: int = 0) -> List[str]:
+        """Recursively serialize a tree_cache node into indented text lines.
+
+        Each line is: "<indent>[start-end] caption". Cache nodes carry a
+        'caption' field plus 'start_sec'/'end_sec'/'children'.
+        """
+        indent = "  " * indent_level
+        start = node.get('start_sec', 0.0)
+        end = node.get('end_sec', 0.0)
+        caption = (node.get('caption') or '').strip()
+        line = f"{indent}[{start:.1f}s-{end:.1f}s] {caption}"
+        lines = [line]
+        for child in node.get('children', []):
+            lines.extend(
+                InferenceEngine._serialize_cache_tree(child, indent_level + 1)
+            )
+        return lines
+
+    def infer_caption_tree(
+        self,
+        video_path: str,
+        video_id: str,
+        question: str,
+        choices: List[str],
+        video_duration: float,
+        ground_truth: Optional[Dict[str, Any]] = None,
+    ) -> Trajectory:
+        """
+        VideoTree-style baseline: feed the entire pre-built caption tree (text
+        only, no frames) to the VLM and ask it to answer the MCQ and predict the
+        evidence interval (temporal grounding) in a single call.
+
+        Requires a tree cache (config.tree_cache_dir) that contains a node for
+        this video. The static tree is used directly for inference; no search,
+        no online segmentation or captioning.
+        """
+        if self.tree_cache is None:
+            raise ValueError(
+                "infer_caption_tree requires config.tree_cache_dir to be set"
+            )
+        self._current_video_id = video_id
+
+        data = self.tree_cache.load(video_id)
+        if data is None or 'tree' not in data:
+            raise ValueError(
+                f"No tree cache entry found for video_id={video_id}"
+            )
+        tree_text = "\n".join(self._serialize_cache_tree(data['tree']))
+
+        # Build GT node for evaluation only
+        gt_node = None
+        if ground_truth:
+            gt_timestamps = ground_truth.get('timestamps')
+            if gt_timestamps:
+                gt_start, gt_end = gt_timestamps
+                gt_node = Node(
+                    start_sec=gt_start, end_sec=gt_end,
+                    frames=[], video_path=video_path, level=-1
+                )
+
+        trajectory = Trajectory(
+            video_id=video_id,
+            question=question,
+            ground_truth=ground_truth or {},
+            gt_node=gt_node
+        )
+
+        # Root node covers the entire video (no frames: text-only baseline)
+        root_node = Node(
+            start_sec=0, end_sec=video_duration,
+            frames=[], video_path=video_path,
+            level=0, parent=None, node_id=0
+        )
+        root_node.visited = True
+        root_node.text_description = self.tree_cache.get_caption(
+            video_id, 0, video_duration
+        ) or f"Root segment [0.0s - {video_duration:.1f}s]"
+
+        initial_obs = Observation(
+            frames=[],
+            text_description=root_node.text_description,
+            node=root_node
+        )
+        trajectory.set_initial_observation(initial_obs)
+
+        try:
+            result, raw_response = self.vlm.caption_tree_answer(
+                question=question,
+                choices=choices,
+                tree_text=tree_text,
+                video_duration=video_duration,
+                skip_reasoning=self.config.skip_reasoning,
+            )
+        except Exception as e:
+            print(f"Warning: caption_tree_answer failed: {e}. Forcing ANSWER.")
+            result = {
+                'reasoning': f'Forced answer due to error: {e}',
+                'answer': 'A',
+                'evidence_start': 0.0,
+                'evidence_end': video_duration,
+            }
+            raw_response = ""
+            trajectory.metadata['forced_termination'] = True
+            trajectory.metadata['forced_termination_reason'] = 'decide_action_error'
+
+        decision = {
+            'answer': result.get('answer') or 'A',
+            'evidence_start': result.get('evidence_start')
+            if result.get('evidence_start') is not None else 0.0,
+            'evidence_end': result.get('evidence_end')
+            if result.get('evidence_end') is not None else video_duration,
+        }
+
+        reasoning = Reasoning(
+            content=result.get('reasoning') or 'Caption-tree baseline answer.',
+            context={'compressed_history': ''},
+            raw_response=raw_response,
+        )
+        self._execute_answer(trajectory, root_node, decision, reasoning)
+
+        trajectory.metadata['num_turns'] = len(trajectory.turns)
+        trajectory.metadata['engine'] = 'InferenceEngine_caption_tree'
+        trajectory.metadata['frames_per_turn'] = [0]
+        trajectory.metadata['total_frames'] = 0
 
         if ground_truth:
             self._compute_eval_metrics(trajectory, ground_truth)

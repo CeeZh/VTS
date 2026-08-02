@@ -280,7 +280,10 @@ def create_scene_segmenter(
     CLIP frame embeddings.
 
     Args:
-        clip_client: clip_client.Client instance connected to a CLIP gRPC service
+        clip_client: clip_client.Client instance connected to a CLIP gRPC
+            service, OR a zero-argument factory returning such a client. A
+            factory is resolved lazily on the first cache-miss segmentation, so
+            that runs backed entirely by a tree cache never touch CLIP.
         fps: Frame sampling rate for scene detection
         max_frames: Maximum frames to sample per segment
         short_side: Resize shorter side to this value (-1 for no resize)
@@ -294,6 +297,19 @@ def create_scene_segmenter(
     Returns:
         segment_fn: callable (video_path, start_sec, end_sec) -> List[Tuple[float, float]]
     """
+    # Resolve the client lazily: a real client exposes `.encode`, while a
+    # factory is a plain callable that returns one. This keeps CLIP entirely
+    # out of the picture when every split is served from a tree cache.
+    _resolved = {"client": None}
+
+    def _client():
+        if _resolved["client"] is None:
+            c = clip_client
+            if callable(c) and not hasattr(c, "encode"):
+                c = c()
+            _resolved["client"] = c
+        return _resolved["client"]
+
     def segment_fn(
         video_path: str, start_sec: float, end_sec: float
     ) -> List[Tuple[float, float]]:
@@ -304,7 +320,7 @@ def create_scene_segmenter(
                     video_path,
                     start_sec,
                     end_sec,
-                    clip_client,
+                    _client(),
                     num_children=num_children,
                     fps=fps,
                     max_frames=max_frames,

@@ -17,48 +17,6 @@ import shutil
 from pathlib import Path
 
 
-def fix_config(checkpoint_dir: str, output_dir: str):
-    """Fix config.json: rope_parameters -> rope_scaling, use_cache, etc.
-
-    Use this for models where the reference HF config has the same nested
-    `text_config` layout as the trained checkpoint (e.g. Qwen3-VL). For models
-    whose reference config uses a flat (transformers-4.x) layout (e.g.
-    Qwen2.5-VL), pass --copy-config-from-original instead.
-    """
-    with open(os.path.join(checkpoint_dir, "config.json")) as f:
-        config = json.load(f)
-
-    text_config = config["text_config"]
-
-    # Fix rope_parameters -> rope_scaling
-    if "rope_parameters" in text_config:
-        rope_params = text_config.pop("rope_parameters")
-        rope_theta = rope_params.pop("rope_theta", None)
-        if rope_theta is not None:
-            text_config["rope_theta"] = rope_theta
-        text_config["rope_scaling"] = rope_params
-
-    # Fix use_cache for inference
-    text_config["use_cache"] = True
-    config["use_cache"] = True
-
-    # Remove extraneous top-level fields from transformers 5.x
-    for key in ["bos_token_id", "eos_token_id", "pad_token_id", "hidden_size", "dtype"]:
-        config.pop(key, None)
-
-    # Remove fields not present in original config
-    text_config.pop("pad_token_id", None)
-    text_config.pop("dtype", None)
-    if "vision_config" in config:
-        config["vision_config"].pop("dtype", None)
-
-    with open(os.path.join(output_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
-
-    print("[OK] config.json fixed (rope_scaling, use_cache, removed extraneous fields)")
-
-
 def fix_generation_config(checkpoint_dir: str, output_dir: str):
     """Fix generation_config.json: deduplicate eos_token_id."""
     src = os.path.join(checkpoint_dir, "generation_config.json")
@@ -104,15 +62,38 @@ def copy_from_checkpoint(checkpoint_dir: str, output_dir: str, filenames: list[s
 
 
 def symlink_weights(checkpoint_dir: str, output_dir: str):
-    """Symlink the large model weights file instead of copying."""
-    weight_src = os.path.join(checkpoint_dir, "model.safetensors")
-    weight_dst = os.path.join(output_dir, "model.safetensors")
-    if not os.path.exists(weight_src):
-        raise FileNotFoundError(f"model.safetensors not found in {checkpoint_dir}")
-    if os.path.exists(weight_dst) or os.path.islink(weight_dst):
-        os.remove(weight_dst)
-    os.symlink(os.path.abspath(weight_src), weight_dst)
-    print(f"[OK] model.safetensors symlinked ({os.path.getsize(weight_src) / 1e9:.1f} GB)")
+    """Symlink the model weights instead of copying.
+
+    Handles both single-file (`model.safetensors`) and sharded
+    (`model-00001-of-0000N.safetensors` + `model.safetensors.index.json`)
+    checkpoints.
+    """
+    single = os.path.join(checkpoint_dir, "model.safetensors")
+    if os.path.exists(single):
+        dst = os.path.join(output_dir, "model.safetensors")
+        if os.path.exists(dst) or os.path.islink(dst):
+            os.remove(dst)
+        os.symlink(os.path.abspath(single), dst)
+        print(f"[OK] model.safetensors symlinked ({os.path.getsize(single) / 1e9:.1f} GB)")
+        return
+
+    # Sharded checkpoint: symlink every shard + copy the index.
+    shards = sorted(Path(checkpoint_dir).glob("model-*-of-*.safetensors"))
+    index = os.path.join(checkpoint_dir, "model.safetensors.index.json")
+    if not shards or not os.path.exists(index):
+        raise FileNotFoundError(
+            f"No model.safetensors or sharded weights (+index) found in {checkpoint_dir}"
+        )
+    total = 0
+    for shard in shards:
+        dst = os.path.join(output_dir, shard.name)
+        if os.path.exists(dst) or os.path.islink(dst):
+            os.remove(dst)
+        os.symlink(os.path.abspath(shard), dst)
+        total += shard.stat().st_size
+    shutil.copy2(index, os.path.join(output_dir, "model.safetensors.index.json"))
+    print(f"[OK] {len(shards)} weight shards symlinked + index copied "
+          f"({total / 1e9:.1f} GB)")
 
 
 def verify(output_dir: str, strict_qwen3: bool = True):
@@ -176,6 +157,8 @@ def main():
         "tokenizer_config.json",
         "merges.txt",
         "vocab.json",
+        "added_tokens.json",
+        "special_tokens_map.json",
     ])
     copy_from_checkpoint(args.checkpoint_dir, args.output_dir, [
         "tokenizer.json",

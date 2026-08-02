@@ -21,7 +21,7 @@ cv2.setNumThreads(2)
 from vlm_interface import DummyVLMInterface, GPTVLMInterface, CaptionLLMInterface
 from inference import InferenceEngine, InferenceConfig
 from utils.dataset import (
-    load_cgbench_data, load_longvideohaystack_data, load_tstar_data, load_momentseeker_data, load_lvbench_data, load_videomme_data, load_mlvu_data, load_longvideobench_data, make_json_serializable
+    load_cgbench_data, load_longvideohaystack_data, load_tstar_data, make_json_serializable
 )
 from utils.keyframe_sampling import derive_keyframe_timestamps
 from utils.temporal import compute_interval_iou
@@ -39,6 +39,7 @@ def _process_sample(
     action_mode="segmented",
     keyframe_mode=False,
     clue_mode=False,
+    caption_tree=False,
     dataset_type="cgbench",
     ## inference config
     max_turns=20,
@@ -54,6 +55,7 @@ def _process_sample(
     min_segment_duration=60.0,
     max_depth=-1,
     clip_url="grpc://localhost:51000",
+    dino_url="grpc://localhost:52000",
     ## uniform segmentation
     num_children=4,
     ## uniform fixed-duration segmentation
@@ -82,6 +84,7 @@ def _process_sample(
     image_tokens=None,
     separate_caption_generation=False,
     caption_frames_from_parent=False,
+    batched_captions=False,
     skip_reasoning=False,
     pregenerated_caption_path=None,
     use_frame_captions=False,
@@ -162,6 +165,7 @@ def _process_sample(
         max_depth=max_depth,
         separate_caption_generation=separate_caption_generation,
         caption_frames_from_parent=caption_frames_from_parent,
+        batched_captions=batched_captions,
         skip_reasoning=skip_reasoning,
         pregenerated_caption_path=pregenerated_caption_path,
         use_frame_captions=use_frame_captions,
@@ -182,14 +186,26 @@ def _process_sample(
             clip_client = Client(clip_url)
         return clip_client
 
+    # Lazily instantiate a single DINO client (used by query-agnostic-dino
+    # scene segmentation). Same drop-in interface as the CLIP client.
+    dino_client = None
+    def _get_dino_client():
+        nonlocal dino_client
+        if dino_client is None:
+            from dino_server import DinoClient
+            dino_client = DinoClient(dino_url)
+        return dino_client
+
     # Set up segmenter based on segment_mode
     segment_fn = None
     if segment_mode == "direct-nonuniform":
         # Non-uniform baseline: single-pass scene segmentation producing exactly
         # dn_num_segments segments (top-k mode), with one center frame each.
         from utils.segmentation import create_scene_segmenter
+        # Pass the factory (not a live client) so CLIP is only contacted on an
+        # actual cache-miss segmentation.
         segment_fn = create_scene_segmenter(
-            _get_clip_client(),
+            _get_clip_client,
             fps=dn_clip_fps,
             max_frames=256,
             short_side=short_side,
@@ -197,8 +213,25 @@ def _process_sample(
         )
     elif segment_mode == "query-agnostic-clip":
         from utils.segmentation import create_scene_segmenter
+        # Pass the factory (not a live client) so CLIP is only contacted on an
+        # actual cache-miss segmentation.
         segment_fn = create_scene_segmenter(
-            _get_clip_client(),
+            _get_clip_client,
+            fps=scene_fps,
+            max_frames=scene_max_frames,
+            short_side=short_side,
+            k=scene_k,
+            min_segments=scene_min_segments,
+            max_segments=scene_max_segments,
+            min_segment_duration=scene_min_duration,
+        )
+    elif segment_mode == "query-agnostic-dino":
+        from utils.segmentation import create_scene_segmenter
+        # Identical to query-agnostic-clip, but boundaries are detected from
+        # DINOv2 frame embeddings instead of CLIP. Pass the factory (not a live
+        # client) so DINO is only contacted on an actual cache-miss segmentation.
+        segment_fn = create_scene_segmenter(
+            _get_dino_client,
             fps=scene_fps,
             max_frames=scene_max_frames,
             short_side=short_side,
@@ -281,6 +314,8 @@ def _process_sample(
         infer_extra_kwargs = {}
         if clue_mode:
             infer_fn = engine.infer_clue
+        elif caption_tree:
+            infer_fn = engine.infer_caption_tree
         elif keyframe_mode:
             infer_fn = engine.infer_direct_keyframes
         elif segment_mode == "direct-nonuniform":
@@ -421,30 +456,7 @@ def _process_sample(
                     for ts in keyframe_timestamps
                 ]
 
-        # Add MomentSeeker-specific fields
-        if dataset_type == "momentseeker":
-            # Extract predicted interval from last turn for easier evaluation
-            if trajectory.turns:
-                last_turn = trajectory.turns[-1]
-                if last_turn.action and last_turn.action.evidence:
-                    json_data['predicted_timestamps'] = list(last_turn.action.evidence['timestamps'])
-
-            # Include all GT intervals if available for multi-interval evaluation
-            if 'gt_all_timestamps' in item:
-                json_data['gt_all_timestamps'] = item['gt_all_timestamps']
-
-        # Add Video-MME-specific fields
-        if dataset_type == "videomme":
-            json_data['sub_category'] = item.get('sub_category')
-            json_data['domain'] = item.get('domain')
-
-        # Add MLVU-specific fields
-        if dataset_type in ["mlvu", "mlvu_dev"]:
-            json_data['question_type'] = item.get('question_type')
-
-        # Add LongVideoBench-specific fields
-        if dataset_type == "longvideobench":
-            json_data['question_category'] = item.get('question_category')
+        # Choose save directory:
 
         # Choose save directory: failed/ subfolder for forced terminations
         if trajectory.metadata.get('forced_termination', False):
@@ -458,7 +470,7 @@ def _process_sample(
             json.dump(json_data, f, indent=4)
 
         # Generate tree visualization (skip for single-turn direct/keyframe modes)
-        if not direct and not keyframe_mode and not clue_mode:
+        if not direct and not keyframe_mode and not clue_mode and not caption_tree:
             try:
                 root_node = trajectory.initial_observation.node
                 gt_node = trajectory.gt_node
@@ -475,58 +487,33 @@ def _process_sample(
     return result
 
 
+# Resolve dataset defaults against the released VTS_data, which the README asks
+# you to symlink to <repo_root>/data. Using __file__ makes these robust to the
+# working directory (e.g. running from infer/ or from the repo root).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATA = _REPO_ROOT / "data"
+
 DATASET_DEFAULTS = {
     "cgbench": {
         "anno_path": "/mnt/arc/cezhang/datasets/CG-Bench/cgbench.json",
-        "video_base_path": "/mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p",
-        "tree_cache_dir": None,
+        "video_base_path": str(_DATA / "videos/cgbench"),
+        "tree_cache_dir": str(_DATA / "tree_cache/cgbench"),
     },
     "cgbench_mini": {
-        "anno_path": "/mnt/arc/cezhang/projects/datagen/output/filters/cgbench_mini/after_no_clue.json",
-        "video_base_path": "/mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/cgbench_mini_filtered",
+        "anno_path": str(_DATA / "annotations/cgbench_mini_filter.json"),
+        "video_base_path": str(_DATA / "videos/cgbench"),
+        "tree_cache_dir": str(_DATA / "tree_cache/cgbench"),
     },
     "lvhaystack_ego4d": {
-        "anno_path": "/mnt/arc/cezhang/datasets/LongVideoHaystack/data/val-00000-of-00001.parquet",
-        "video_base_path": "/mnt/sun/mmiemon/datasets/ego4d/v1/video_540ss",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_ego4d",
+        "anno_path": str(_DATA / "annotations/haystack_ego4d_val.parquet"),
+        "video_base_path": str(_DATA / "videos/ego4d"),
+        "tree_cache_dir": str(_DATA / "tree_cache/lvhaystack_ego4d"),
     },
     "lvhaystack_longvideobench": {
         "anno_path": "/mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json",
         # "video_base_path": "/mnt/arc/cezhang/datasets/longvideobench/videos",
         "video_base_path": "/mnt/arc/cezhang/datasets/longvideobench/videos_reencode",
         "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_longvideobench",
-    },
-    "momentseeker": {
-        "anno_path": "/mnt/arc/cezhang/datasets/MomentSeeker/t2v.json",
-        "video_base_path": "/mnt/arc/cezhang/datasets/MomentSeeker/videos",
-        "tree_cache_dir": None,
-    },
-    "lvbench": {
-        "anno_path": "/mnt/arc/cezhang/datasets/LVBench/data/test-00000-of-00001.parquet",
-        "video_base_path": "/mnt/arc/cezhang/datasets/LVBench/extracted_videos",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvbench",
-    },
-    "mlvu": {
-        "anno_path": "/mnt/arc/cezhang/datasets/MLVU_Test/MLVU_Test/test-ground-truth/test_mcq_gt.json",
-        "video_base_path": "/mnt/arc/cezhang/datasets/MLVU_Test/MLVU_Test/video",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/mlvu",
-    },
-    "mlvu_dev": {
-        "anno_path": "/mnt/arc/cezhang/datasets/MLVU/MLVU/dev_question.json",
-        "video_base_path": "/mnt/arc/cezhang/datasets/MLVU/MLVU/video",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/mlvu",
-    },
-    "videomme": {
-        "anno_path": "/mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/datasets--lmms-lab--Video-MME/snapshots/ead1408f75b618502df9a1d8e0950166bf0a2a0b/videomme/test-00000-of-00001.parquet",
-        "video_base_path": "/mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/datasets--lmms-lab--Video-MME/snapshots/ead1408f75b618502df9a1d8e0950166bf0a2a0b/videos/data",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/videomme",
-    },
-    "longvideobench": {
-        "anno_path": "/mnt/arc/cezhang/datasets/longvideobench/lvb_val.json",
-        # "video_base_path": "/mnt/opr/yblin/mycache/longvideobench/videos",
-        "video_base_path": "/mnt/arc/cezhang/datasets/longvideobench/videos_reencode",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/longvideobench",
     },
 }
 
@@ -559,11 +546,13 @@ def run_inference(
     action_mode: str = "segmented",
     keyframe_mode: bool = False,
     clue_mode: bool = False,
+    caption_tree: bool = False,
     # Segment splitting (common)
     segment_mode: str = "uniform",
     min_segment_duration: float = 60.0,
     max_depth: int = -1,
     clip_url: str = "grpc://localhost:51000",
+    dino_url: str = "grpc://localhost:52000",
     # Uniform segmentation
     num_children: int = 4,
     # Uniform fixed-duration segmentation
@@ -590,6 +579,7 @@ def run_inference(
     image_tokens: int | None = None,
     separate_caption_generation: bool = False,
     caption_frames_from_parent: bool = False,
+    batched_captions: bool = False,
     skip_reasoning: bool = False,
     pregenerated_caption_path: str | None = None,
     use_frame_captions: bool = False,
@@ -722,32 +712,6 @@ def run_inference(
                     anno_path, video_base_path,
                     num_samples=num_examples, shuffle=False
                 )
-            elif dataset_type == "momentseeker":
-                dataset = load_momentseeker_data(
-                    anno_path, video_base_path,
-                    num_samples=num_examples, shuffle=False,
-                    multi_interval=True  # Enable for R@1 evaluation with multi-interval support
-                )
-            elif dataset_type == "lvbench":
-                dataset = load_lvbench_data(
-                    anno_path, video_base_path,
-                    num_samples=num_examples, shuffle=False,
-                )
-            elif dataset_type in ["mlvu", "mlvu_dev"]:
-                dataset = load_mlvu_data(
-                    anno_path, video_base_path,
-                    num_samples=num_examples, shuffle=False,
-                )
-            elif dataset_type == "videomme":
-                dataset = load_videomme_data(
-                    anno_path, video_base_path,
-                    num_samples=num_examples, shuffle=False,
-                )
-            elif dataset_type == "longvideobench":
-                dataset = load_longvideobench_data(
-                    anno_path, video_base_path,
-                    num_samples=num_examples, shuffle=False,
-                )
             else:
                 raise ValueError(f"Invalid dataset type: {dataset_type}")
             print(f"Loaded {len(dataset)} samples")
@@ -834,6 +798,7 @@ def run_inference(
                 direct=direct, direct_prompt_style=direct_prompt_style,
                 video_native=video_native,
                 action_mode=action_mode, keyframe_mode=keyframe_mode, clue_mode=clue_mode,
+                caption_tree=caption_tree,
                 dataset_type=dataset_type,
                 max_turns=max_turns, fps=fps,
                 max_frames=max_frames, short_side=short_side,
@@ -845,6 +810,7 @@ def run_inference(
                 min_segment_duration=min_segment_duration,
                 max_depth=max_depth,
                 clip_url=clip_url,
+                dino_url=dino_url,
                 num_children=num_children,
                 uf_child_duration=uf_child_duration,
                 scene_min_segments=scene_min_segments, scene_max_segments=scene_max_segments,
@@ -863,6 +829,7 @@ def run_inference(
                 image_tokens=image_tokens,
                 separate_caption_generation=separate_caption_generation,
                 caption_frames_from_parent=caption_frames_from_parent,
+                batched_captions=batched_captions,
                 skip_reasoning=skip_reasoning,
                 pregenerated_caption_path=pregenerated_caption_path,
                 use_frame_captions=use_frame_captions,
@@ -1143,193 +1110,6 @@ def run_inference(
         else:
             print("Warning: No valid samples found for Longvideohaystack evaluation")
 
-    # ===== MomentSeeker-specific Metrics =====
-    ms_metrics = None
-    if dataset_type == "momentseeker":
-        print("\n" + "=" * 80)
-        print("COMPUTING MOMENTSEEKER R@1 METRICS")
-        print("=" * 80)
-
-        # Load per-sample JSONs and prepare data for evaluation
-        eval_data = []
-        for sample_path in sorted(samples_output_path.glob("*.json")):
-            try:
-                with open(sample_path) as f:
-                    data = json.load(f)
-                    # Include samples with required fields
-                    if data.get('gt_timestamps') and data.get('turns'):
-                        eval_data.append(data)
-            except Exception as e:
-                print(f"Warning: Failed to load {sample_path}: {e}")
-
-        if eval_data:
-            from utils.eval import evaluate_momentseeker
-            try:
-                ms_metrics = evaluate_momentseeker(
-                    result_data=eval_data,
-                    iou_thresholds=[0.1, 0.2, 0.3, 0.4, 0.5]
-                )
-
-                print("\n" + "=" * 80)
-                print("MOMENTSEEKER R@1 METRICS")
-                print("=" * 80)
-                print(f"R@1 @ IoU=0.1: {ms_metrics['R@1_IoU=0.1']:.4f}")
-                print(f"R@1 @ IoU=0.2: {ms_metrics['R@1_IoU=0.2']:.4f}")
-                print(f"R@1 @ IoU=0.3: {ms_metrics['R@1_IoU=0.3']:.4f}  (main metric)")
-                print(f"R@1 @ IoU=0.4: {ms_metrics['R@1_IoU=0.4']:.4f}")
-                print(f"R@1 @ IoU=0.5: {ms_metrics['R@1_IoU=0.5']:.4f}")
-                print(f"Evaluated samples: {ms_metrics['num_samples']}")
-            except Exception as e:
-                print(f"Error computing MomentSeeker metrics: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("Warning: No valid samples found for MomentSeeker evaluation")
-
-    # ===== Video-MME-specific Metrics =====
-    vmme_metrics = None
-    if dataset_type == "videomme":
-        print("\n" + "=" * 80)
-        print("COMPUTING VIDEO-MME METRICS")
-        print("=" * 80)
-
-        # Load per-sample JSONs for evaluation
-        eval_data = []
-        for sample_path in sorted(samples_output_path.glob("*.json")):
-            try:
-                with open(sample_path) as f:
-                    data = json.load(f)
-                    if data.get('answer_correct') is not None:
-                        eval_data.append(data)
-            except Exception as e:
-                print(f"Warning: Failed to load {sample_path}: {e}")
-
-        # Also include failed samples
-        failed_path = samples_output_path / "failed"
-        if failed_path.exists():
-            for sample_path in sorted(failed_path.glob("*.json")):
-                try:
-                    with open(sample_path) as f:
-                        data = json.load(f)
-                        if data.get('answer_correct') is not None:
-                            eval_data.append(data)
-                except Exception as e:
-                    print(f"Warning: Failed to load {sample_path}: {e}")
-
-        if eval_data:
-            from utils.eval import evaluate_videomme
-            try:
-                vmme_metrics = evaluate_videomme(result_data=eval_data)
-
-                print("\n" + "=" * 80)
-                print("VIDEO-MME ACCURACY")
-                print("=" * 80)
-                print(f"Overall:  {vmme_metrics['overall_accuracy']:.4f} ({vmme_metrics['num_samples']} samples)")
-                for cat in ['short', 'medium', 'long']:
-                    print(f"  {cat.capitalize():8s}: {vmme_metrics[f'{cat}_accuracy']:.4f} ({vmme_metrics[f'{cat}_count']} samples)")
-            except Exception as e:
-                print(f"Error computing Video-MME metrics: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("Warning: No valid samples found for Video-MME evaluation")
-
-    # ===== MLVU-specific Metrics =====
-    mlvu_metrics = None
-    if dataset_type in ["mlvu", "mlvu_dev"]:
-        print("\n" + "=" * 80)
-        print("COMPUTING MLVU METRICS")
-        print("=" * 80)
-
-        eval_data = []
-        for sample_path in sorted(samples_output_path.glob("*.json")):
-            try:
-                with open(sample_path) as f:
-                    data = json.load(f)
-                    if data.get('answer_correct') is not None:
-                        eval_data.append(data)
-            except Exception as e:
-                print(f"Warning: Failed to load {sample_path}: {e}")
-
-        failed_path = samples_output_path / "failed"
-        if failed_path.exists():
-            for sample_path in sorted(failed_path.glob("*.json")):
-                try:
-                    with open(sample_path) as f:
-                        data = json.load(f)
-                        if data.get('answer_correct') is not None:
-                            eval_data.append(data)
-                except Exception as e:
-                    print(f"Warning: Failed to load {sample_path}: {e}")
-
-        if eval_data:
-            from utils.eval import evaluate_mlvu
-            try:
-                mlvu_metrics = evaluate_mlvu(result_data=eval_data)
-
-                print("\n" + "=" * 80)
-                print("MLVU ACCURACY")
-                print("=" * 80)
-                print(f"Overall:  {mlvu_metrics['overall_accuracy']:.4f} ({mlvu_metrics['num_samples']} samples)")
-                for key in sorted(mlvu_metrics.keys()):
-                    if key.endswith('_accuracy') and key != 'overall_accuracy':
-                        qtype = key.removesuffix('_accuracy')
-                        print(f"  {qtype:20s}: {mlvu_metrics[key]:.4f} ({mlvu_metrics[f'{qtype}_count']} samples)")
-            except Exception as e:
-                print(f"Error computing MLVU metrics: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("Warning: No valid samples found for MLVU evaluation")
-
-    # ===== LongVideoBench-specific Metrics =====
-    lvb_metrics = None
-    if dataset_type == "longvideobench":
-        print("\n" + "=" * 80)
-        print("COMPUTING LONGVIDEOBENCH METRICS")
-        print("=" * 80)
-
-        eval_data = []
-        for sample_path in sorted(samples_output_path.glob("*.json")):
-            try:
-                with open(sample_path) as f:
-                    data = json.load(f)
-                    if data.get('answer_correct') is not None:
-                        eval_data.append(data)
-            except Exception as e:
-                print(f"Warning: Failed to load {sample_path}: {e}")
-
-        failed_path = samples_output_path / "failed"
-        if failed_path.exists():
-            for sample_path in sorted(failed_path.glob("*.json")):
-                try:
-                    with open(sample_path) as f:
-                        data = json.load(f)
-                        if data.get('answer_correct') is not None:
-                            eval_data.append(data)
-                except Exception as e:
-                    print(f"Warning: Failed to load {sample_path}: {e}")
-
-        if eval_data:
-            from utils.eval import evaluate_longvideobench
-            try:
-                lvb_metrics = evaluate_longvideobench(result_data=eval_data)
-
-                print("\n" + "=" * 80)
-                print("LONGVIDEOBENCH ACCURACY")
-                print("=" * 80)
-                print(f"Overall:  {lvb_metrics['overall_accuracy']:.4f} ({lvb_metrics['num_samples']} samples)")
-                for key in sorted(lvb_metrics.keys()):
-                    if key.endswith('_accuracy') and key != 'overall_accuracy':
-                        category = key.removesuffix('_accuracy')
-                        print(f"  {category:20s}: {lvb_metrics[key]:.4f} ({lvb_metrics[f'{category}_count']} samples)")
-            except Exception as e:
-                print(f"Error computing LongVideoBench metrics: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("Warning: No valid samples found for LongVideoBench evaluation")
-
     print("\n" + "=" * 80)
     print("RESULTS SUMMARY")
     print("=" * 80)
@@ -1388,6 +1168,8 @@ def run_inference(
     # Save aggregate summary
     summary_path = output_path / "summary.json"
     uses_clip = segment_mode in ("query-agnostic-clip", "query-aware-clip", "direct-nonuniform")
+    uses_dino = segment_mode == "query-agnostic-dino"
+    uses_scene = segment_mode in ("query-agnostic-clip", "query-agnostic-dino")
     summary_dict = {
         'config': {
             'num_examples': num_examples,
@@ -1407,14 +1189,15 @@ def run_inference(
             'resume': resume,
             'segment_mode': segment_mode,
             'clip_url': clip_url if uses_clip else None,
+            'dino_url': dino_url if uses_dino else None,
             'num_children': num_children if segment_mode == "uniform" else None,
             'uf_child_duration': uf_child_duration if segment_mode == "uniform-fixed" else None,
-            'scene_min_segments': scene_min_segments if segment_mode == "query-agnostic-clip" else None,
-            'scene_max_segments': scene_max_segments if segment_mode == "query-agnostic-clip" else None,
-            'scene_k': scene_k if segment_mode == "query-agnostic-clip" else None,
-            'scene_fps': scene_fps if segment_mode == "query-agnostic-clip" else None,
-            'scene_max_frames': scene_max_frames if segment_mode == "query-agnostic-clip" else None,
-            'scene_min_duration': scene_min_duration if segment_mode == "query-agnostic-clip" else None,
+            'scene_min_segments': scene_min_segments if uses_scene else None,
+            'scene_max_segments': scene_max_segments if uses_scene else None,
+            'scene_k': scene_k if uses_scene else None,
+            'scene_fps': scene_fps if uses_scene else None,
+            'scene_max_frames': scene_max_frames if uses_scene else None,
+            'scene_min_duration': scene_min_duration if uses_scene else None,
             'dn_num_segments': dn_num_segments if segment_mode == "direct-nonuniform" else None,
             'dn_clip_fps': dn_clip_fps if segment_mode == "direct-nonuniform" else None,
         },
@@ -1444,16 +1227,6 @@ def run_inference(
     # Add Longvideohaystack metrics if available
     if lvh_metrics is not None:
         summary_dict['lvhaystack_metrics'] = lvh_metrics
-
-    # Add MomentSeeker metrics if available
-    if ms_metrics is not None:
-        summary_dict['momentseeker_metrics'] = ms_metrics
-
-    if vmme_metrics is not None:
-        summary_dict['videomme_metrics'] = vmme_metrics
-
-    if lvb_metrics is not None:
-        summary_dict['longvideobench_metrics'] = lvb_metrics
 
     with open(summary_path, 'w') as f:
         json.dump(summary_dict, f, indent=4)
@@ -1497,7 +1270,7 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--num-workers", type=int, default=16,
                         help="Number of parallel worker threads (default: 16)")
     parser.add_argument("-d", "--dataset", type=str, default="cgbench",
-                        choices=["cgbench", "cgbench_mini", "lvhaystack_ego4d", "lvhaystack_longvideobench", "momentseeker", "lvbench", "videomme", "mlvu", "mlvu_dev", "longvideobench"],
+                        choices=["cgbench", "cgbench_mini", "lvhaystack_ego4d", "lvhaystack_longvideobench"],
                         help="Dataset type (default: cgbench)")
     parser.add_argument("--anno-path", type=str, default=None,
                         help="Path to annotation file (default: dataset-specific)")
@@ -1567,7 +1340,7 @@ if __name__ == "__main__":
                              "asks for answer + evidence_start/end as JSON) or 'lmm' "
                              "(lmms-eval-style letter-only prompt with Qwen3-VL "
                              "<{ts:.1f} seconds> labels, temperature=0, max_tokens=32). "
-                             "Use 'lmm' to match lmms-eval longvideobench evaluation.")
+                             "Use 'lmm' to match lmms-eval evaluation.")
     parser.add_argument("--video-native", action="store_true",
                         help="--direct only: send the full video as a single video_url "
                              "attachment instead of interleaving sampled frames+timestamps")
@@ -1585,11 +1358,21 @@ if __name__ == "__main__":
     parser.add_argument("--clue-mode", action="store_true",
                         help="Oracle clue baseline: feed GT clue interval to VLM "
                              "instead of full video (requires GT timestamps)")
+    parser.add_argument("--caption-tree", action="store_true",
+                        help="VideoTree-style baseline: feed the entire pre-built "
+                             "caption tree (text only, no frames) to the VLM and ask "
+                             "it to answer + predict the evidence interval in a single "
+                             "call. Requires --tree-cache-dir (or a dataset default).")
     parser.add_argument("--separate-caption-generation", action="store_true",
                         help="Generate captions in separate per-segment VLM calls before decide_action")
     parser.add_argument("--caption-frames-from-parent", action="store_true",
                         help="Caption/decide each child using parent frames cropped to the child's "
                              "time range, instead of frames newly sampled within the child")
+    parser.add_argument("--batched-captions", action="store_true",
+                        help="With --separate-caption-generation: caption ALL child segments in a "
+                             "single VLM call over the parent's frames (one caption call + one "
+                             "action call per turn), instead of one caption call per child. "
+                             "No effect unless --separate-caption-generation is set.")
     parser.add_argument("--skip-reasoning", action="store_true",
                         help="Omit the reasoning field from VLM JSON schema (no chain-of-thought)")
     parser.add_argument("--decide-action-type", type=str, default="default",
@@ -1628,13 +1411,17 @@ if __name__ == "__main__":
     seg_group = parser.add_argument_group("Segment splitting (common)")
     seg_group.add_argument("--segment-mode", type=str, default="query-agnostic-clip",
                            choices=["uniform", "uniform-fixed", "query-agnostic-clip",
-                                    "query-aware-clip", "direct-nonuniform", "no-split"],
+                                    "query-agnostic-dino", "query-aware-clip",
+                                    "direct-nonuniform", "no-split"],
                            help="Strategy for splitting a node into children. "
                                 "'uniform' = equal non-overlapping splits "
                                 "(--num-children chunks); "
                                 "'uniform-fixed' = non-overlapping chunks of fixed duration "
                                 "(--uf-child-duration seconds each, last chunk may be shorter); "
                                 "'query-agnostic-clip' = CLIP scene-boundary segmentation "
+                                "(no query); "
+                                "'query-agnostic-dino' = same scene-boundary segmentation "
+                                "but using DINOv2 frame embeddings instead of CLIP "
                                 "(no query); "
                                 "'query-aware-clip' = CLIP segmentation conditioned on the "
                                 "question text embedding (NOT YET IMPLEMENTED); "
@@ -1654,6 +1441,9 @@ if __name__ == "__main__":
                            help="gRPC URL for CLIP server (used by query-agnostic-clip, "
                                 "query-aware-clip, and direct-nonuniform modes; "
                                 "also used by --keyframe-sampling=clip).")
+    seg_group.add_argument("--dino-url", type=str, default="grpc://localhost:52000",
+                           help="gRPC URL for DINO server (used by query-agnostic-dino "
+                                "mode).")
 
     # === Uniform segmentation (--segment-mode uniform) ===
     uni_group = parser.add_argument_group("Uniform segmentation (--segment-mode uniform)")
@@ -1763,11 +1553,13 @@ if __name__ == "__main__":
         action_mode=args.action_mode,
         keyframe_mode=args.keyframe_mode,
         clue_mode=args.clue_mode,
+        caption_tree=args.caption_tree,
         # Segment splitting
         segment_mode=args.segment_mode,
         min_segment_duration=args.min_segment_duration,
         max_depth=args.max_depth,
         clip_url=args.clip_url,
+        dino_url=args.dino_url,
         num_children=args.num_children,
         uf_child_duration=args.uf_child_duration,
         scene_min_segments=args.scene_min_segments,
@@ -1789,6 +1581,7 @@ if __name__ == "__main__":
         image_tokens=args.image_tokens,
         separate_caption_generation=args.separate_caption_generation,
         caption_frames_from_parent=args.caption_frames_from_parent,
+        batched_captions=args.batched_captions,
         skip_reasoning=args.skip_reasoning,
         pregenerated_caption_path=args.pregenerated_caption_path,
         use_frame_captions=args.use_frame_captions,
@@ -1846,9 +1639,6 @@ python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/
 ## Baseline 2: Segmented (multi-turn agentic with segment_id actions)
 python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/seg_qwen8b_f64 --action-mode segmented --max-frames 64 --anno-path /mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json
 
-
-# MomentSeeker
-python example_inference.py -n -1 -w 8 -d momentseeker -o ./output/inference/momentseeker/direct_qwen8b_f64 --direct --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/MomentSeeker/t2v.json --base-url http://oprime:1234/v1
 '''
 
 

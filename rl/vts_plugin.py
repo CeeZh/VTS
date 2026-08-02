@@ -7,9 +7,9 @@ Implements:
 - TreeFormatReward, TreeAccuracyReward, TreeIOUReward: Reward functions.
 
 Usage:
-  swift rollout --external_plugins rl/video_crop_plugin.py \
+  swift rollout --external_plugins rl/vts_plugin.py \
       --multi_turn_scheduler tree_search_scheduler ...
-  swift rlhf --external_plugins rl/video_crop_plugin.py \
+  swift rlhf --external_plugins rl/vts_plugin.py \
       --reward_funcs tree_acc_reward tree_iou_reward tree_format_reward ...
 """
 
@@ -46,6 +46,80 @@ from utils.prompt_utils import (
     parse_action_response_sft,
     VALID_ACTIONS,
 )
+
+
+# =========================================================================== #
+# Monkeypatch: underflow-safe GRPO per-token log-probs for VL multi-turn.
+#
+# ms-swift 3.10.0's GRPOTrainer._get_per_token_logps_and_entropies_single crashes
+# intermittently with:
+#   RuntimeError: Size does not match at dimension 0 expected index [N+1,1]
+#   to be no larger than self [N, vocab]   (in trl selective_log_softmax)
+# when a batch contains a near-prompt-less sequence: `logits_to_keep`
+# (the batch-wide completion span) can exceed a sequence's width, so the model
+# returns one fewer logit row than the slice `logits[:, -(ltk+1):-1]` assumes.
+# Over a long run this recurs (~1% of steps) and, because it can strand training
+# just past the last checkpoint, it can prevent progress entirely.
+#
+# Fix: clamp the effective keep to what the model actually returned, then left-pad
+# the resulting logps/entropies back to `logits_to_keep`. The padded positions are
+# prompt tokens that the completion mask zeroes out downstream, so the fix is a
+# no-op on normal batches and only rescues the rare degenerate ones.
+# =========================================================================== #
+def _vts_install_grpo_logps_patch():
+    try:
+        import torch
+        from swift.trainers.rlhf_trainer import grpo_trainer as _gt
+        from trl.trainer.utils import selective_log_softmax
+        try:
+            from trl.trainer.utils import entropy_from_logits
+        except Exception:
+            from swift.trainers.rlhf_trainer.utils import entropy_from_logits
+
+        GRPOTrainer = _gt.GRPOTrainer
+        if getattr(GRPOTrainer, '_vts_logps_patched', False):
+            return
+        _orig_single = GRPOTrainer._get_per_token_logps_and_entropies_single
+
+        def _safe_single(self, model, inputs, compute_entropy=False):
+            # Only the multimodal path hits the fragile slice; delegate the rest.
+            if getattr(self.template, 'sequence_parallel_size', 1) > 1 or not getattr(self, 'is_multimodal', False):
+                return _orig_single(self, model, inputs, compute_entropy=compute_entropy)
+
+            logits_to_keep = inputs['logits_to_keep']
+            input_ids = inputs['input_ids']
+            fwd = {
+                k: v for k, v in inputs.items()
+                if k not in ['logits_to_keep', 'completion_mask', 'ref_per_token_logps',
+                             'advantages', 'old_per_token_logps', 'truncated_mask', 'seq_lengths']
+            }
+            if 'logits_to_keep' in self.model_kwarg_keys:
+                fwd['logits_to_keep'] = logits_to_keep + 1
+            logits = model(**fwd).logits
+            avail = logits.shape[1]
+            eff = min(logits_to_keep, avail - 1)          # underflow-safe
+            logits = logits[:, -(eff + 1):-1, :]
+            logits = logits / self.temperature
+            ids = input_ids[:, -eff:]
+            logps = selective_log_softmax(logits, ids)
+            entropies = entropy_from_logits(logits) if compute_entropy else None
+            if eff < logits_to_keep:                       # rare degenerate batch
+                pad_n = logits_to_keep - eff
+                logps = torch.cat(
+                    [logps.new_zeros(logps.shape[0], pad_n), logps], dim=1)
+                if entropies is not None:
+                    entropies = torch.cat(
+                        [entropies.new_zeros(entropies.shape[0], pad_n), entropies], dim=1)
+            return logps, entropies
+
+        GRPOTrainer._get_per_token_logps_and_entropies_single = _safe_single
+        GRPOTrainer._vts_logps_patched = True
+    except Exception:
+        # Never let the patch break plugin import (e.g. in the rollout process).
+        pass
+
+
+_vts_install_grpo_logps_patch()
 
 
 # =========================================================================== #
