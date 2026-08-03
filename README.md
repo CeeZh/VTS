@@ -243,10 +243,6 @@ Key knobs in the YAML configs ([sft_qwen3.yaml](sft/sft_qwen3.yaml), [sft_qwen2.
 - `flash_attn: sdpa` — attention backend (`fa2` if you installed flash-attn).
 - `output_dir` — checkpoint destination.
 
-The raw synthesized trajectories that `sft.json` is rendered from are in the
-[released dataset](#dataset) under `trajectories/`. The trajectory synthesis
-pipeline (the code that generates them) will be released in a follow-up.
-
 ## RL
 
 After SFT we further fine-tune the policy with GRPO.
