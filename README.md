@@ -222,6 +222,8 @@ source ../LLaMA-Factory/.venv/bin/activate       # the SFT env
 llamafactory-cli train ./sft/sft_qwen3.yaml      # Qwen3-VL-8B
 # or
 llamafactory-cli train ./sft/sft_qwen2.5.yaml    # Qwen2.5-VL-7B
+# quick smoke test (a few steps on a handful of samples):
+llamafactory-cli train ./sft/sft_qwen3.yaml max_steps=10 max_samples=64 output_dir=/tmp/sft_smoke
 ```
 
 `llamafactory-cli` auto-launches `torchrun` across all visible GPUs. The configs
@@ -229,17 +231,6 @@ point at `dataset_dir: data` (the downloaded folder, which ships
 `dataset_info.json` -> `data/sft/sft.json`) and `media_dir: .` (the repo root),
 because the image paths baked into `sft.json` are repo-root-relative
 (`data/frames/<dataset>/...`) and thus resolve directly.
-
-On SLURM, use the provided launcher (single node, 4x H100, `h100_comm_shared`
-QoS). Submit it from the VTS repo root:
-
-```bash
-sbatch sft/train_sft.sbatch                                   # Qwen3-VL-8B, full run
-CONFIG=./sft/sft_qwen2.5.yaml sbatch sft/train_sft.sbatch     # Qwen2.5-VL-7B
-# quick smoke test (a few steps on a handful of samples):
-EXTRA_ARGS="max_steps=10 max_samples=64 output_dir=/tmp/sft_smoke" \
-    sbatch sft/train_sft.sbatch
-```
 
 Key knobs in the YAML configs ([sft_qwen3.yaml](sft/sft_qwen3.yaml), [sft_qwen2.5.yaml](sft/sft_qwen2.5.yaml)):
 

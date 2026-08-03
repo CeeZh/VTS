@@ -5,8 +5,8 @@ Converts CGBench annotations into JSONL format suitable for Swift GRPO
 training with the TreeSearchScheduler.
 
 Usage:
-    python rl/datasets/cgbench_rl.py \
-        --anno_path /mnt/arc/cezhang/datasets/CG-Bench/cgbench.json \
+    python rl/data_scripts/cgbench_rl.py \
+        --anno_path data/annotations/cgbench.json \
         --output_path rl/data/qa_tree.jsonl
 
 Design note: Each dataset is a class with load() and to_jsonl() methods.
@@ -33,9 +33,9 @@ class CGBenchRLDataset:
     def __init__(
         self,
         anno_path: str,
-        video_base_path: str = '/mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p',
-        frames_base_path: str = '/mnt/arc/cezhang/datasets/CG-Bench/frames_1fps',
-        tree_cache_dir: Optional[str] = '/mnt/arc/cezhang/projects/datagen/output/tree_cache/cgbench',
+        video_base_path: str = 'data/videos/cgbench',
+        frames_base_path: str = 'data/frames/cgbench',
+        tree_cache_dir: Optional[str] = 'data/tree_cache/cgbench',
         require_tree_cache: bool = False,
         require_frames: bool = True,
     ):
@@ -139,22 +139,22 @@ def main():
     )
     parser.add_argument(
         '--anno_path',
-        default='/mnt/arc/cezhang/projects/datagen/output/filters/cgbench/after_no_clue_nomini.json',
+        default='data/annotations/cgbench.json',
         help='Path to CGBench annotation JSON',
     )
     parser.add_argument(
         '--video_base_path',
-        default='/mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p',
+        default='data/videos/cgbench',
         help='Base path for video files',
     )
     parser.add_argument(
         '--frames_base_path',
-        default='/mnt/arc/cezhang/datasets/CG-Bench/frames_1fps',
+        default='data/frames/cgbench',
         help='Base path for pre-extracted frames',
     )
     parser.add_argument(
         '--tree_cache_dir',
-        default='/mnt/arc/cezhang/projects/datagen/output/tree_cache/cgbench_filtered',
+        default='data/tree_cache/cgbench',
         help='Path to tree cache directory',
     )
     parser.add_argument(
@@ -194,18 +194,9 @@ if __name__ == '__main__':
 
 '''
 python rl/data_scripts/cgbench_rl.py \
-    --video_base_path /mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p \
-    --frames_base_path /mnt/arc/cezhang/datasets/CG-Bench/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/cgbench \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/filters/cgbench/after_clue_nomini.json \
-    --output_path rl/data/cgbench_after_clue.jsonl
-'''
-
-'''
-python rl/data_scripts/cgbench_rl.py \
-    --video_base_path /mnt/arc/cezhang/datasets/CG-Bench/cg_videos_720p \
-    --frames_base_path /mnt/arc/cezhang/datasets/CG-Bench/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/cgbench \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/generation/traj_filtered_splits/cgbench/60.json \
-    --output_path rl/data/merged/cgbench_60.jsonl
+    --video_base_path data/videos/cgbench \
+    --frames_base_path data/frames/cgbench \
+    --tree_cache_dir data/tree_cache/cgbench \
+    --anno_path data/annotations/cgbench.json \
+    --output_path rl/data/cgbench.jsonl
 '''

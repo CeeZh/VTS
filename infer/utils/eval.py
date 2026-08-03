@@ -1,8 +1,8 @@
 """
 Evaluation metrics for Longvideohaystack benchmark.
 
-Functions copied from the benchmark authors' evaluation code:
-/mnt/arc/cezhang/projects/TStar/LVHaystackBench/val_tstar_results.py
+Functions copied from the benchmark authors' evaluation code
+(LVHaystack / TStar `val_tstar_results.py`).
 
 This module provides:
 - Temporal PRF (Precision, Recall, F1) metrics

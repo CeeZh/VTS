@@ -495,7 +495,7 @@ _DATA = _REPO_ROOT / "data"
 
 DATASET_DEFAULTS = {
     "cgbench": {
-        "anno_path": "/mnt/arc/cezhang/datasets/CG-Bench/cgbench.json",
+        "anno_path": str(_DATA / "annotations/cgbench.json"),
         "video_base_path": str(_DATA / "videos/cgbench"),
         "tree_cache_dir": str(_DATA / "tree_cache/cgbench"),
     },
@@ -510,10 +510,9 @@ DATASET_DEFAULTS = {
         "tree_cache_dir": str(_DATA / "tree_cache/lvhaystack_ego4d"),
     },
     "lvhaystack_longvideobench": {
-        "anno_path": "/mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json",
-        # "video_base_path": "/mnt/arc/cezhang/datasets/longvideobench/videos",
-        "video_base_path": "/mnt/arc/cezhang/datasets/longvideobench/videos_reencode",
-        "tree_cache_dir": "/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_longvideobench",
+        "anno_path": str(_DATA / "annotations/haystack_lvbench.json"),
+        "video_base_path": str(_DATA / "videos/lvbench"),
+        "tree_cache_dir": None,
     },
 }
 
@@ -1315,7 +1314,7 @@ if __name__ == "__main__":
                         choices=["segment", "frame"],
                         help="Captioning mode for caption_llm: 'segment' captions all frames "
                              "together, 'frame' captions each frame individually (default: segment)")
-    parser.add_argument("--pregenerated-caption-path", type=str, default="/mnt/arc/cezhang/projects/Qwen2.5-VL/captions/cg_captions/qwen3_8b_frames_1fps",
+    parser.add_argument("--pregenerated-caption-path", type=str, default=None,
                         help="Path to directory of pre-generated caption JSON files. "
                              "Each file is named {video_id}.json with timestamp keys.")
     parser.add_argument("--use-frame-captions", action="store_true",
@@ -1600,45 +1599,38 @@ if __name__ == "__main__":
     )
 
 
-# Example commands:
+# Example commands (annotation / video / tree-cache paths default to data/... via
+# DATASET_DEFAULTS; pass --anno-path / --video-base-path / --tree-cache-dir only to override):
 '''
 # CGBench mini
 ## Baseline 1: Direct (single-turn, no search)
-python example_inference.py -n -1 -w 16 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f64 --direct --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/CG-Bench/cgbench_mini.json 
-python example_inference.py -n -1 -w 16 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f256 --direct --max-frames 256 --anno-path /mnt/arc/cezhang/datasets/CG-Bench/cgbench_mini.json 
-python example_inference.py -n -1 -w 4 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f786 --direct --max-frames 768 --anno-path /mnt/arc/cezhang/datasets/CG-Bench/cgbench_mini.json 
+python example_inference.py -n -1 -w 16 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f64 --direct --max-frames 64
+python example_inference.py -n -1 -w 16 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f256 --direct --max-frames 256
+python example_inference.py -n -1 -w 4 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_qwen8b_f768 --direct --max-frames 768
 
 ## Baseline 1b: Direct non-uniform (scene segmentation → center frames, single-turn)
-python example_inference.py -n -1 -w 8 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_nonuniform_qwen8b_f64 --segment-mode direct-nonuniform --dn-num-segments 64 --max-frames 64 --clip-url grpc://localhost:51000 --anno-path /mnt/arc/cezhang/datasets/CG-Bench/cgbench_mini.json
+python example_inference.py -n -1 -w 8 -d cgbench_mini -o ./output/inference/cgbench_mini/direct_nonuniform_qwen8b_f64 --segment-mode direct-nonuniform --dn-num-segments 64 --max-frames 64 --clip-url grpc://localhost:51000
 
 ## Baseline 2: Segmented (multi-turn agentic with segment_id actions)
-python example_inference.py -n -1 -w 8 -d cgbench_mini -o ./output/inference/cgbench_mini/seg_qwen8b_f64 --action-mode segmented --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/CG-Bench/cgbench_mini.json
-
+python example_inference.py -n -1 -w 8 -d cgbench_mini -o ./output/inference/cgbench_mini/seg_qwen8b_f64 --action-mode segmented --max-frames 64
 
 
 # LVHaystack Ego4D:
 ## Baseline 1: Direct (single-turn, no search)
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_val/direct_qwen8b_f64 --direct --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/val-00000-of-00001.parquet --keyframe-mode
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_test_tiny/direct_qwen8b_f64 --direct --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/test_tiny-00000-of-00001.parquet --keyframe-mode
-
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_val/direct_qwen8b_f256 --direct --max-frames 256 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/val-00000-of-00001.parquet --keyframe-mode
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_test_tiny/direct_qwen8b_f256 --direct --max-frames 256 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/test_tiny-00000-of-00001.parquet --keyframe-mode
+python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d/direct_qwen8b_f64 --direct --max-frames 64 --keyframe-mode
+python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d/direct_qwen8b_f256 --direct --max-frames 256 --keyframe-mode
 
 ## Baseline 2: Segmented (multi-turn agentic with segment_id actions)
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_val/seg_qwen8b_f64 --action-mode segmented --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/val-00000-of-00001.parquet
-python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d_test_tiny/seg_qwen8b_f64 --action-mode segmented --max-frames 64 --anno-path /mnt/arc/cezhang/datasets/LongVideoHaystack/data/test_tiny-00000-of-00001.parquet
-
-
+python example_inference.py -n -1 -w 8 -d lvhaystack_ego4d -o ./output/inference/lvhaystack_ego4d/seg_qwen8b_f64 --action-mode segmented --max-frames 64
 
 
 # LVHaystack LongVideoBench:
 ## Baseline 1: Direct (single-turn, no search)
-python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/direct_qwen8b_f64 --direct --max-frames 64 --anno-path /mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json --keyframe-mode
-python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/direct_qwen8b_f256 --direct --max-frames 256 --anno-path /mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json --keyframe-mode
+python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/direct_qwen8b_f64 --direct --max-frames 64 --keyframe-mode
+python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/direct_qwen8b_f256 --direct --max-frames 256 --keyframe-mode
 
 ## Baseline 2: Segmented (multi-turn agentic with segment_id actions)
-python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/seg_qwen8b_f64 --action-mode segmented --max-frames 64 --anno-path /mnt/arc/cezhang/projects/TStar/lvb_val_TStarFormat_with_metadata.json
-
+python example_inference.py -n -1 -w 8 -d lvhaystack_longvideobench -o ./output/inference/lvhaystack_longvideobench/seg_qwen8b_f64 --action-mode segmented --max-frames 64
 '''
 
 
@@ -1673,7 +1665,7 @@ python example_inference.py -n -1 -w 8 -d cgbench_mini \
 python example_inference.py -n 1000 -w 32 -d cgbench_mini \
     --vlm-type caption_llm \
     --base-url http://localhost:4321/v1 \
-    --llm-api-key sk-3990209d16164af1acdf345e9cd301ed \
+    --llm-api-key "$LLM_API_KEY" \
     --clip-url grpc://localhost:51000 \
     --save-prompts \
     --segment-mode query-agnostic-clip \
@@ -1686,8 +1678,8 @@ python example_inference.py -n 1000 -w 32 -d cgbench_mini \
 '''
 python example_inference.py -n 1000 -w 16 -d cgbench_mini \
     --vlm-type caption_llm \
-    --base-url http://bumblebee:1234/v1 \
-    --llm-api-key sk-3990209d16164af1acdf345e9cd301ed \
+    --base-url http://localhost:1234/v1 \
+    --llm-api-key "$LLM_API_KEY" \
     --clip-url grpc://localhost:51000 \
     --save-prompts \
     --segment-mode query-agnostic-clip \

@@ -185,63 +185,16 @@ if __name__ == "__main__":
 
 
 '''
-python rl/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen/output/checkpoints/checkpoint-1600 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen/output/checkpoints/checkpoint-1600-converted
-'''
-
-
-'''
-python rl/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_lvhaystack/output/checkpoints/checkpoint-800 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_lvhaystack/output/checkpoints/checkpoint-800-converted
-'''
-
-'''
-python rl/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_youtube_40/output/checkpoints/checkpoint-759 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_youtube_40/output/checkpoints/checkpoint-759-converted
-'''
-
-
-'''
+# Qwen3-VL (single-file or sharded LLaMA-Factory checkpoint):
 python rl/scripts/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_3source_40/output/checkpoints/checkpoint-1260 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_3source_40/output/checkpoints/checkpoint-1260-converted
-'''
+    --checkpoint-dir output/vts_qwen3_vl_8b \
+    --original-model-dir ~/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/<snapshot> \
+    --output-dir output/vts_qwen3_vl_8b-converted
 
-'''
+# Qwen2.5-VL: reference config is flat (transformers 4.x), so add --copy-config-from-original.
 python rl/scripts/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_crop_video_flat/output/checkpoints/checkpoint-524 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_crop_video_flat/output/checkpoints/checkpoint-524-converted
-'''
-
-'''
-
-huggingface-cli upload ceezh/vtemp \
-  /mnt/arc/cezhang/projects/LlamaFactory/datagen_lvhaystack/output/checkpoints/checkpoint-800-converted \
-  sft-lvhaystack
-
-'''
-
-
-'''
-python rl/scripts/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_zoom_in/output/checkpoints/checkpoint-1052 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_zoom_in/output/checkpoints/checkpoint-1052-converted
-'''
-
-# Qwen2.5-VL: reference config is flat (transformers 4.x), so use --copy-config-from-original.
-'''
-python rl/scripts/convert_checkpoint.py \
-    --checkpoint-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_3source_40/output_qwen2.5/checkpoints/checkpoint-1260 \
-    --original-model-dir /mnt/arc/cezhang/xdg_dirs/cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5 \
-    --output-dir /mnt/arc/cezhang/projects/LlamaFactory/datagen_3source_40/output_qwen2.5/checkpoints/checkpoint-1260-converted \
+    --checkpoint-dir output/vts_qwen2_5_vl_7b \
+    --original-model-dir ~/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/<snapshot> \
+    --output-dir output/vts_qwen2_5_vl_7b-converted \
     --copy-config-from-original
 '''

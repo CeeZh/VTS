@@ -6,7 +6,7 @@ Swift GRPO training with the TreeSearchScheduler.
 
 Usage:
     python rl/data_scripts/youtube_rl.py \
-        --anno_path /mnt/arc/cezhang/projects/datagen/output/generation/youtube_filtered_splits/60.json \
+        --anno_path data/annotations/longclueqa.json \
         --output_path rl/data/youtube_60.jsonl
 """
 
@@ -29,8 +29,8 @@ class YouTubeRLDataset:
         self,
         anno_path: str,
         video_base_path: str = '',
-        frames_base_path: str = '/mnt/mir/ce/datasets/youtube/frames_1fps',
-        tree_cache_dir: Optional[str] = '/mnt/arc/cezhang/projects/datagen/output/tree_cache/youtube',
+        frames_base_path: str = 'data/frames/longclueqa',
+        tree_cache_dir: Optional[str] = 'data/tree_cache/longclueqa',
         require_tree_cache: bool = False,
         require_frames: bool = True,
     ):
@@ -133,7 +133,7 @@ def main():
     )
     parser.add_argument(
         '--anno_path',
-        default='/mnt/arc/cezhang/projects/datagen/output/generation/youtube_filtered_splits/60.json',
+        default='data/annotations/longclueqa.json',
         help='Path to YouTube annotation JSON',
     )
     parser.add_argument(
@@ -143,12 +143,12 @@ def main():
     )
     parser.add_argument(
         '--frames_base_path',
-        default='/mnt/mir/ce/datasets/youtube/frames_1fps',
+        default='data/frames/longclueqa',
         help='Base path for pre-extracted frames',
     )
     parser.add_argument(
         '--tree_cache_dir',
-        default='/mnt/arc/cezhang/projects/datagen/output/tree_cache/youtube',
+        default='data/tree_cache/longclueqa',
         help='Path to tree cache directory',
     )
     parser.add_argument(
@@ -188,19 +188,10 @@ if __name__ == '__main__':
 
 '''
 python rl/data_scripts/youtube_rl.py \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/generation/youtube_filtered_splits/60.json \
+    --anno_path data/annotations/longclueqa.json \
     --video_base_path "" \
-    --frames_base_path /mnt/mir/ce/datasets/youtube/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/youtube \
+    --frames_base_path data/frames/longclueqa \
+    --tree_cache_dir data/tree_cache/longclueqa \
     --output_path rl/data/youtube_60.jsonl
-'''
-
-'''
-python rl/data_scripts/youtube_rl.py \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/generation/traj_filtered_splits/youtube/60.json \
-    --video_base_path "" \
-    --frames_base_path /mnt/mir/ce/datasets/youtube/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/youtube \
-    --output_path rl/data/merged/youtube_60.jsonl
 '''
 

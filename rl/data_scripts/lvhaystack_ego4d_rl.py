@@ -6,7 +6,7 @@ GRPO training with the TreeSearchScheduler.
 
 Usage:
     python rl/data_scripts/lvhaystack_ego4d_rl.py \
-        --anno_path /mnt/arc/cezhang/projects/datagen/output/filters/lvhaystack-ego4d/after_no_clue.json \
+        --anno_path data/annotations/haystack_ego4d.json \
         --output_path rl/data/lvhaystack_ego4d.jsonl
 """
 
@@ -29,9 +29,9 @@ class LVHaystackEgo4DRLDataset:
     def __init__(
         self,
         anno_path: str,
-        video_base_path: str = '/mnt/sun/mmiemon/datasets/ego4d/v1/video_540ss',
-        frames_base_path: str = '/mnt/arc/cezhang/datasets/lvhaystack_ego4d/frames_1fps',
-        tree_cache_dir: Optional[str] = '/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_ego4d',
+        video_base_path: str = 'data/videos/ego4d',
+        frames_base_path: str = 'data/frames/ego4d',
+        tree_cache_dir: Optional[str] = 'data/tree_cache/lvhaystack_ego4d',
         require_tree_cache: bool = False,
         require_frames: bool = True,
     ):
@@ -152,22 +152,22 @@ def main():
     )
     parser.add_argument(
         '--anno_path',
-        default='/mnt/arc/cezhang/projects/datagen/output/filters/lvhaystack-ego4d/after_no_clue.json',
+        default='data/annotations/haystack_ego4d.json',
         help='Path to LVHaystack-Ego4D annotation JSON',
     )
     parser.add_argument(
         '--video_base_path',
-        default='/mnt/sun/mmiemon/datasets/ego4d/v1/video_540ss',
+        default='data/videos/ego4d',
         help='Base path for video files',
     )
     parser.add_argument(
         '--frames_base_path',
-        default='/mnt/arc/cezhang/datasets/lvhaystack_ego4d/frames_1fps',
+        default='data/frames/ego4d',
         help='Base path for pre-extracted frames',
     )
     parser.add_argument(
         '--tree_cache_dir',
-        default='/mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_ego4d',
+        default='data/tree_cache/lvhaystack_ego4d',
         help='Path to tree cache directory',
     )
     parser.add_argument(
@@ -207,18 +207,9 @@ if __name__ == '__main__':
 
 '''
 python rl/data_scripts/lvhaystack_ego4d_rl.py \
-    --video_base_path /mnt/sun/mmiemon/datasets/ego4d/v1/video_540ss \
-    --frames_base_path /mnt/arc/cezhang/datasets/lvhaystack_ego4d/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_ego4d \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/filters/lvhaystack-ego4d/after_clue.json \
-    --output_path rl/data/lvhaystack_ego4d_after_clue.jsonl
-'''
-
-'''
-python rl/data_scripts/lvhaystack_ego4d_rl.py \
-    --video_base_path /mnt/sun/mmiemon/datasets/ego4d/v1/video_540ss \
-    --frames_base_path /mnt/arc/cezhang/datasets/lvhaystack_ego4d/frames_1fps \
-    --tree_cache_dir /mnt/arc/cezhang/projects/datagen/output/tree_cache/lvhaystack_ego4d \
-    --anno_path /mnt/arc/cezhang/projects/datagen/output/generation/traj_filtered_splits/lvhaystack_ego4d/60.json \
-    --output_path rl/data/merged/lvhaystack_ego4d_60.jsonl
+    --video_base_path data/videos/ego4d \
+    --frames_base_path data/frames/ego4d \
+    --tree_cache_dir data/tree_cache/lvhaystack_ego4d \
+    --anno_path data/annotations/haystack_ego4d.json \
+    --output_path rl/data/lvhaystack_ego4d.jsonl
 '''
