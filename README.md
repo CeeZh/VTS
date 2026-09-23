@@ -301,3 +301,16 @@ Key hyper-parameters:
 - `--num_generations 8 --steps_per_generation 8 --beta 0.04` — GRPO sampling/regularization settings.
 
 After RL, merge the LoRA adapter into the base policy with `swift export --adapter ... --merge_lora true`.
+
+## Citation
+
+If you find our work useful, please consider citing:
+
+```bibtex
+@article{zhang2026searching,
+  title={Searching Videos as Trees: Self-Correcting Agents for Grounded Long Video QA},
+  author={Zhang, Ce and Wang, Ziyang and Pan, Yulu and Oguntola, Oluwatumininu and Wagh, Pranav and Wu, Qiyu and Wakaki, Hiromi and Bansal, Mohit and Bertasius, Gedas},
+  journal={arXiv preprint arXiv:2607.16189},
+  year={2026}
+}
+```
